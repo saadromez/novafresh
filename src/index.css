@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply text-brand-dark bg-brand-bg;
+  }
+}
+
+.print-only,
+.print-report-only {
+  display: none;
+}
+
+@media print {
+  @page { margin: 8mm; size: auto; }
+  body { width: 100% !important; margin: 0 !important; padding: 0 !important; background: white !important; }
+  #root { display: none !important; }
+  .print-only { 
+    display: block !important; position: static !important; margin: 0 !important; padding: 0 !important;
+    width: 100% !important; max-width: 100% !important;
+    color: #000000 !important; background: #FFFFFF !important;
+    font-weight: 900 !important;
+    font-family: monospace !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    -webkit-font-smoothing: none !important;
+    text-rendering: geometricPrecision !important;
+  }
+  .print-report-only {
+    display: block !important;
+    position: static !important;
+    margin: 0 !important;
+    padding: 4mm !important;
+    width: 100% !important;
+    color: #000000 !important;
+    background: #FFFFFF !important;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+    font-size: 11pt !important;
+    line-height: 1.35 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}
+
+.hide-spin-button::-webkit-inner-spin-button,
+.hide-spin-button::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.hide-spin-button {
+  -moz-appearance: textfield;
+}
