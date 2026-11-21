@@ -1204,8 +1204,14 @@ function App() {
           <div className="mt-3.5 flex items-center gap-2">
             <button
               onClick={async () => {
-                // @ts-ignore
-                await window.db?.installUpdateNow?.();
+                const isUserAdmin = currentUser?.role?.toLowerCase() === 'admin' || (currentUser?.username || '').toLowerCase() === 'admin';
+                if (isUserAdmin) {
+                  // @ts-ignore
+                  await window.db?.installUpdateNow?.();
+                } else {
+                  // Cashier clicked global bubble: navigate to dashboard to authenticate with admin password
+                  setCurrentView('dashboard');
+                }
               }}
               className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs rounded-xl shadow-lg shadow-emerald-500/30 transition transform active:scale-95 cursor-pointer"
             >

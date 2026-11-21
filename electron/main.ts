@@ -1897,7 +1897,7 @@ ipcMain.handle('get-categories', async () => {
 
   ipcMain.handle('get-products-advanced', async () => {
     try {
-      let products: any[] = db.prepare('SELECT p.*, COALESCE(c.name, "General") as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC').all();
+      let products: any[] = db.prepare("SELECT p.*, COALESCE(c.name, 'General') as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC").all();
 
       // If local cache is empty (e.g. brand new installation), pull from cloud once
       if (products.length === 0) {
@@ -1905,7 +1905,7 @@ ipcMain.handle('get-categories', async () => {
           const isOnline = await checkRemoteConnection(2000);
           if (isOnline) {
             await pullLatestData(db);
-            products = db.prepare('SELECT p.*, COALESCE(c.name, "General") as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC').all();
+            products = db.prepare("SELECT p.*, COALESCE(c.name, 'General') as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC").all();
           }
         } catch (_) {}
       }
@@ -2103,13 +2103,13 @@ ipcMain.on('show-confirm', (event, msg) => {
 
 ipcMain.handle('get-products', async () => {
   try {
-    let products: any[] = db.prepare('SELECT p.*, COALESCE(c.name, "General") as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC').all();
+    let products: any[] = db.prepare("SELECT p.*, COALESCE(c.name, 'General') as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC").all();
     if (products.length === 0) {
       try {
         const isOnline = await checkRemoteConnection(2000);
         if (isOnline) {
           await pullLatestData(db);
-          products = db.prepare('SELECT p.*, COALESCE(c.name, "General") as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC').all();
+          products = db.prepare("SELECT p.*, COALESCE(c.name, 'General') as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC").all();
         }
       } catch (_) {}
     }
@@ -7534,6 +7534,62 @@ app.whenReady().then(() => {
   ipcMain.handle('install-update-now', () => {
     // isSilent: true (no external installer wizard/prompts), isForceRunAfter: true (restart immediately)
     autoUpdater.quitAndInstall(true, true);
+  });
+
+  ipcMain.handle('get-app-version', () => {
+    return app.getVersion();
+  });
+
+  ipcMain.handle('verify-admin-auth', async (_, { pin, password, username }: any = {}) => {
+    try {
+      const secret = (pin || password || '').toString().trim();
+      if (!secret) return { success: false, error: 'PIN or Password is required.' };
+      const secretNoSpaces = secret.replace(/\s+/g, '');
+
+      // 1. Check local SQLite users table
+      let user: any = null;
+      if (username) {
+        user = db.prepare("SELECT id, username, role, permissions FROM users WHERE username = ? COLLATE NOCASE AND (pin = ? OR replace(pin, ' ', '') = ?)").get(username.trim(), secret, secretNoSpaces);
+      } else {
+        user = db.prepare("SELECT id, username, role, permissions FROM users WHERE (LOWER(role) = 'admin' OR LOWER(role) = 'manager' OR LOWER(username) = 'admin') AND (pin = ? OR replace(pin, ' ', '') = ?) LIMIT 1").get(secret, secretNoSpaces);
+        if (!user) {
+          const anyUser: any = db.prepare("SELECT id, username, role, permissions FROM users WHERE pin = ? OR replace(pin, ' ', '') = ? LIMIT 1").get(secret, secretNoSpaces);
+          if (anyUser && (anyUser.role?.toLowerCase() === 'admin' || anyUser.role?.toLowerCase() === 'manager' || anyUser.username?.toLowerCase() === 'admin')) {
+            user = anyUser;
+          }
+        }
+      }
+
+      // 2. Fallback to remote cloud employee if online
+      if (!user) {
+        try {
+          const isOnline = await checkRemoteConnection(1500);
+          if (isOnline) {
+            const pool = getRemotePool();
+            const [remoteRows]: any = await pool.query(
+              "SELECT * FROM novafreshmart_employees WHERE (LOWER(role) = 'admin' OR LOWER(role) = 'manager' OR LOWER(username) = 'admin') AND (pin = ? OR replace(pin, ' ', '') = ?) AND is_active = 1 LIMIT 1",
+              [secret, secretNoSpaces]
+            );
+            if (Array.isArray(remoteRows) && remoteRows.length > 0) {
+              user = remoteRows[0];
+            }
+          }
+        } catch (_) {}
+      }
+
+      if (user) {
+        const role = (user.role || '').toLowerCase();
+        const uName = (user.username || '').toLowerCase();
+        if (role === 'admin' || role === 'manager' || uName === 'admin') {
+          return { success: true, user: { id: user.id, username: user.username, role: user.role } };
+        }
+        return { success: false, error: 'Access Denied: Entered PIN belongs to a cashier. Admin or Manager authorization is required.' };
+      }
+
+      return { success: false, error: 'Incorrect Admin PIN / Password.' };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
   });
 
   app.on('activate', () => {

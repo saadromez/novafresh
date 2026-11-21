@@ -102,6 +102,8 @@ contextBridge.exposeInMainWorld('db', {
   getServerStats: () => ipcRenderer.invoke('get-server-stats'),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   installUpdateNow: () => ipcRenderer.invoke('install-update-now'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  verifyAdminAuth: (data: any) => ipcRenderer.invoke('verify-admin-auth', data),
   auditShiftActualCash: (data: any) => ipcRenderer.invoke('audit-shift-actual-cash', data)
 })
 

@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { 
   Package, TrendingUp, TrendingDown, DollarSign, AlertTriangle, 
   BarChart2, Users, Activity, Wallet, Monitor, Building2, 
-  CheckCircle2, Clock, Shield, ArrowUpRight, ShoppingBag, Trash2, Plus, X, Printer
+  CheckCircle2, Clock, Shield, ArrowUpRight, ShoppingBag, Trash2, Plus, X, Printer,
+  RefreshCw, Download, RotateCcw, Sparkles, Lock, Eye, EyeOff, KeyRound, AlertCircle
 } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
 import { startOfDay, endOfDay, startOfWeek, startOfMonth } from 'date-fns';
@@ -23,6 +24,18 @@ export default function DashboardView({ currentUser }: { currentUser: any }) {
   const [newTerminal, setNewTerminal] = useState({ id: '', branch_id: 'BR-MAIN', name: '' });
   const [branchesList, setBranchesList] = useState<any[]>([]);
 
+  // POS Software Update System States
+  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'none' | 'available' | 'downloading' | 'ready' | 'error'>('idle');
+  const [updateVersion, setUpdateVersion] = useState<string>('');
+  const [updatePercent, setUpdatePercent] = useState<number>(0);
+  const [updateError, setUpdateError] = useState<string>('');
+  const [currentAppVersion, setCurrentAppVersion] = useState<string>('0.2.6');
+  const [showAdminAuthModal, setShowAdminAuthModal] = useState<boolean>(false);
+  const [adminPasswordInput, setAdminPasswordInput] = useState<string>('');
+  const [adminAuthError, setAdminAuthError] = useState<string>('');
+  const [isAuthorizingUpdate, setIsAuthorizingUpdate] = useState<boolean>(false);
+  const [showPassword, setShowPassword] = useState<boolean>(false);
+
   useEffect(() => {
     loadDashboardData(false);
     const interval = setInterval(() => {
@@ -30,6 +43,124 @@ export default function DashboardView({ currentUser }: { currentUser: any }) {
     }, 30000);
     return () => clearInterval(interval);
   }, [dateRange, currentUser]);
+
+  useEffect(() => {
+    // 1. Fetch current version
+    // @ts-ignore
+    if (window.db?.getAppVersion) {
+      // @ts-ignore
+      window.db.getAppVersion().then((v: string) => {
+        if (v) setCurrentAppVersion(v);
+      }).catch(() => {});
+    }
+
+    // 2. Setup auto-updater listeners
+    const onUpdateAvailable = (_: any, info: any) => {
+      setUpdateStatus('available');
+      setUpdateVersion(info?.version || '');
+    };
+    const onUpdateProgress = (_: any, info: any) => {
+      setUpdateStatus('downloading');
+      setUpdatePercent(Math.round(info?.percent || 0));
+    };
+    const onUpdateDownloaded = (_: any, info: any) => {
+      setUpdateStatus('ready');
+      setUpdateVersion(info?.version || '');
+    };
+    const onUpdateNone = () => {
+      setUpdateStatus('none');
+    };
+    const onUpdateError = (_: any, info: any) => {
+      setUpdateStatus('error');
+      setUpdateError(info?.message || 'Update check failed.');
+    };
+
+    // @ts-ignore
+    if (window.ipcRenderer?.on) {
+      // @ts-ignore
+      window.ipcRenderer.on('update-available', onUpdateAvailable);
+      // @ts-ignore
+      window.ipcRenderer.on('update-download-progress', onUpdateProgress);
+      // @ts-ignore
+      window.ipcRenderer.on('update-downloaded', onUpdateDownloaded);
+      // @ts-ignore
+      window.ipcRenderer.on('update-not-available', onUpdateNone);
+      // @ts-ignore
+      window.ipcRenderer.on('update-error', onUpdateError);
+    }
+
+    return () => {
+      // @ts-ignore
+      if (window.ipcRenderer?.off) {
+        // @ts-ignore
+        window.ipcRenderer.off('update-available', onUpdateAvailable);
+        // @ts-ignore
+        window.ipcRenderer.off('update-download-progress', onUpdateProgress);
+        // @ts-ignore
+        window.ipcRenderer.off('update-downloaded', onUpdateDownloaded);
+        // @ts-ignore
+        window.ipcRenderer.off('update-not-available', onUpdateNone);
+        // @ts-ignore
+        window.ipcRenderer.off('update-error', onUpdateError);
+      }
+    };
+  }, []);
+
+  const handleCheckForUpdates = async () => {
+    setUpdateStatus('checking');
+    setUpdateVersion('');
+    setUpdateError('');
+    try {
+      // @ts-ignore
+      await window.db?.checkForUpdates?.();
+      setTimeout(() => {
+        setUpdateStatus(prev => prev === 'checking' ? 'none' : prev);
+      }, 12000);
+    } catch (err: any) {
+      setUpdateStatus('error');
+      setUpdateError(err?.message || 'Unable to check for updates.');
+    }
+  };
+
+  const handleTriggerInstall = () => {
+    const isUserAdmin = currentUser?.role?.toLowerCase() === 'admin' || (currentUser?.username || '').toLowerCase() === 'admin';
+    if (isUserAdmin) {
+      // Direct install for admin
+      // @ts-ignore
+      window.db?.installUpdateNow?.();
+    } else {
+      // Ask Cashier for Admin PIN / Password
+      setAdminPasswordInput('');
+      setAdminAuthError('');
+      setShowAdminAuthModal(true);
+    }
+  };
+
+  const handleAuthorizeAndInstall = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!adminPasswordInput.trim()) {
+      setAdminAuthError('Admin Password or PIN is required.');
+      return;
+    }
+
+    setIsAuthorizingUpdate(true);
+    setAdminAuthError('');
+    try {
+      // @ts-ignore
+      const res = await window.db?.verifyAdminAuth?.({ pin: adminPasswordInput });
+      if (res?.success) {
+        setShowAdminAuthModal(false);
+        // @ts-ignore
+        await window.db?.installUpdateNow?.();
+      } else {
+        setAdminAuthError(res?.error || 'Invalid Admin Password or PIN. Authorization failed.');
+      }
+    } catch (err: any) {
+      setAdminAuthError('Verification error: ' + (err.message || String(err)));
+    } finally {
+      setIsAuthorizingUpdate(false);
+    }
+  };
 
   const loadDashboardData = async (isSilent = false) => {
     if (!isSilent) setIsLoading(true);
@@ -538,6 +669,75 @@ export default function DashboardView({ currentUser }: { currentUser: any }) {
           >
             This Month
           </button>
+        </div>
+      </div>
+
+      {/* ── SYSTEM UPDATE CONTROL WIDGET (VISIBLE TO CASHIER & ADMIN) ── */}
+      <div className="bg-white p-4 sm:p-5 rounded-3xl border border-gray-100 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-center gap-3.5">
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white flex items-center justify-center shrink-0 shadow-md shadow-emerald-500/20">
+            <Sparkles size={22} />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-black text-slate-800 uppercase tracking-wider">Nova FreshMart System Updates</h3>
+              <span className="text-[11px] font-bold font-mono bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full">
+                v{currentAppVersion}
+              </span>
+            </div>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {updateStatus === 'checking' && 'Checking for latest POS updates from server...'}
+              {updateStatus === 'none' && 'System is running the latest verified release.'}
+              {updateStatus === 'available' && `Update v${updateVersion} discovered. Downloading in background...`}
+              {updateStatus === 'downloading' && `Downloading update v${updateVersion} (${updatePercent}%)...`}
+              {updateStatus === 'ready' && `Update v${updateVersion} downloaded & ready! ${!data.isAdmin ? '(Requires Admin Password to apply)' : ''}`}
+              {updateStatus === 'error' && (updateError || 'Unable to reach update server. Check internet connection.')}
+              {updateStatus === 'idle' && 'Check for new features, speed improvements, and automatic bug fixes.'}
+            </p>
+          </div>
+        </div>
+
+        {/* Action Controls & Progress */}
+        <div className="flex items-center gap-3 flex-wrap">
+          {updateStatus === 'downloading' && (
+            <div className="flex flex-col gap-1 min-w-[200px]">
+              <div className="flex justify-between text-[11px] font-bold text-emerald-700">
+                <span>Downloading update...</span>
+                <span>{updatePercent}%</span>
+              </div>
+              <div className="w-full bg-emerald-100 rounded-full h-2 overflow-hidden">
+                <div 
+                  className="bg-emerald-600 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${updatePercent}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {updateStatus === 'ready' ? (
+            <button
+              onClick={handleTriggerInstall}
+              className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-xs uppercase tracking-wider rounded-2xl transition-all shadow-lg shadow-emerald-600/30 active:scale-95 cursor-pointer animate-pulse"
+            >
+              <RotateCcw size={15} />
+              <span>Apply & Restart POS {data.isAdmin ? '' : '(Admin Auth)'}</span>
+            </button>
+          ) : (
+            <button
+              onClick={handleCheckForUpdates}
+              disabled={updateStatus === 'checking' || updateStatus === 'downloading'}
+              className="flex items-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 disabled:opacity-60 font-bold text-xs rounded-2xl transition-all cursor-pointer border border-slate-200"
+            >
+              <RefreshCw size={14} className={updateStatus === 'checking' ? 'animate-spin text-emerald-600' : ''} />
+              <span>{updateStatus === 'checking' ? 'Checking Updates...' : 'Check for Updates'}</span>
+            </button>
+          )}
+
+          {updateStatus === 'none' && (
+            <span className="hidden sm:inline-flex items-center gap-1.5 text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl">
+              <CheckCircle2 size={14} /> Up to Date
+            </span>
+          )}
         </div>
       </div>
 
@@ -1273,6 +1473,135 @@ export default function DashboardView({ currentUser }: { currentUser: any }) {
         currentUser={currentUser}
         branchName={branchesList?.[0]?.name || 'Main FreshMart Branch'}
       />
+
+      {/* ── MODAL: ADMIN PASSWORD AUTHORIZATION TO INSTALL UPDATE ── */}
+      {showAdminAuthModal && (
+        <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-[9999] flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full border border-slate-100 overflow-hidden transform scale-100 transition-all">
+            {/* Modal Header */}
+            <div className="bg-gradient-to-r from-slate-900 to-slate-800 p-5 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/30">
+                  <Shield size={20} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black uppercase tracking-wider text-white">Admin Authorization Required</h3>
+                  <p className="text-[11px] text-slate-300">Authorize POS Software Update</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAdminAuthModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg transition"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <form onSubmit={handleAuthorizeAndInstall} className="p-6 space-y-4">
+              <div className="text-center">
+                <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-700 flex items-center justify-center mx-auto mb-2.5 border border-emerald-100">
+                  <KeyRound size={24} />
+                </div>
+                <h4 className="font-black text-slate-800 text-base">Enter Admin Password / PIN</h4>
+                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                  Cashiers cannot apply software updates without supervisor approval.
+                  Please ask an <strong>Admin</strong> or <strong>Manager</strong> to enter their PIN or password to proceed.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-black text-slate-700 uppercase tracking-wider mb-1.5">
+                  Admin PIN or Password
+                </label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    value={adminPasswordInput}
+                    onChange={e => setAdminPasswordInput(e.target.value)}
+                    placeholder="Enter Admin PIN or Password"
+                    className="w-full bg-slate-50 border border-slate-300 rounded-2xl px-4 py-3.5 pr-11 text-center text-lg font-black tracking-widest text-slate-900 outline-none focus:border-emerald-600 focus:bg-white transition"
+                    autoFocus
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(p => !p)}
+                    className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                  >
+                    {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Touchscreen On-Screen Keypad */}
+              <div className="grid grid-cols-3 gap-1.5 pt-1">
+                {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(num => (
+                  <button
+                    key={num}
+                    type="button"
+                    onClick={() => setAdminPasswordInput(p => p + num)}
+                    className="py-2.5 bg-slate-100 hover:bg-slate-200 active:bg-slate-300 rounded-xl font-black text-slate-800 text-base transition select-none cursor-pointer"
+                  >
+                    {num}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setAdminPasswordInput('')}
+                  className="py-2.5 bg-rose-50 hover:bg-rose-100 active:bg-rose-200 text-rose-700 rounded-xl font-bold text-xs uppercase tracking-wider transition select-none cursor-pointer"
+                >
+                  Clear
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAdminPasswordInput(p => p + '0')}
+                  className="py-2.5 bg-slate-100 hover:bg-slate-200 active:bg-slate-300 rounded-xl font-black text-slate-800 text-base transition select-none cursor-pointer"
+                >
+                  0
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAdminPasswordInput(p => p.slice(0, -1))}
+                  className="py-2.5 bg-slate-100 hover:bg-slate-200 active:bg-slate-300 text-slate-700 rounded-xl font-bold text-xs uppercase tracking-wider transition select-none cursor-pointer"
+                >
+                  Del
+                </button>
+              </div>
+
+              {adminAuthError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-2xl text-xs font-bold flex items-center gap-2">
+                  <AlertCircle size={16} className="shrink-0" />
+                  <span>{adminAuthError}</span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowAdminAuthModal(false)}
+                  className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isAuthorizingUpdate || !adminPasswordInput.trim()}
+                  className="flex-1 px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white rounded-xl text-xs font-black uppercase tracking-wider shadow-md shadow-emerald-600/20 transition cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  {isAuthorizingUpdate ? (
+                    <RefreshCw size={14} className="animate-spin" />
+                  ) : (
+                    <Lock size={14} />
+                  )}
+                  <span>{isAuthorizingUpdate ? 'Verifying...' : 'Authorize & Install'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
     </div>
   );
