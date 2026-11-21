@@ -27,7 +27,7 @@ export default function DashboardView({ currentUser }: { currentUser: any }) {
     loadDashboardData(false);
     const interval = setInterval(() => {
       loadDashboardData(true);
-    }, 15000);
+    }, 30000);
     return () => clearInterval(interval);
   }, [dateRange, currentUser]);
 

@@ -188,7 +188,16 @@ export default function ProductsView({ products, loadProducts, currentUser }: an
     setPage(1);
   }, [search, selectedBranchFilter, pageSize]);
 
-  const parentCategories = categories.filter(c => !c.parent_id)
+  const parentCategories = useMemo(() => {
+    const map = new Map<string, any>();
+    for (const c of categories) {
+      if (!c.parent_id && c.name) {
+        const key = c.name.trim().toLowerCase();
+        if (!map.has(key)) map.set(key, c);
+      }
+    }
+    return Array.from(map.values());
+  }, [categories]);
   const inp = 'w-full border border-gray-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-brand-primary/20 font-medium text-brand-dark bg-gray-50'
 
   return (

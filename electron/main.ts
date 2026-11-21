@@ -384,7 +384,7 @@ function ensureAllSchemaColumns(database: any) {
 
 // NOTE: ensureAllSchemaColumns(db) is called AFTER all table creation below
 try { db.exec('ALTER TABLE grn_items ADD COLUMN new_wholesale_price REAL DEFAULT 0'); } catch(e) {}
-startAutoSync(db, 10000)
+startAutoSync(db, 30000)
 
 // Setup some basic tables if they don't exist
 db.exec(`
@@ -987,8 +987,8 @@ try { db.exec("UPDATE invoices SET sale_type = 'REFUND' WHERE total < 0 AND (sal
   try { db.exec('ALTER TABLE product_variants ADD COLUMN expiry_date TEXT') } catch (e) {}
   try { 
     db.exec(`
-      INSERT INTO inventory_ledger (product_id, transaction_type, qty_change, balance_after, notes, created_by)
-      SELECT id, 'ADJUSTMENT', stock, stock, 'Opening Stock (Backfill)', 'System'
+      INSERT INTO inventory_ledger (product_id, transaction_type, qty_change, balance_after, notes, created_by, created_at, synced)
+      SELECT id, 'ADJUSTMENT', stock, stock, 'Opening Stock (Backfill)', 'System', '${getSriLankaNowString()}', 0
       FROM products
       WHERE stock > 0 AND id NOT IN (SELECT DISTINCT product_id FROM inventory_ledger)
     `);
@@ -1227,31 +1227,53 @@ ipcMain.handle('get-categories', async () => {
     const isOnline = await checkRemoteConnection(1500);
     if (isOnline) {
       const pool = getRemotePool();
-      const [remoteCats]: any = await pool.query('SELECT * FROM novafreshmart_categories ORDER BY name ASC');
+      const [remoteCats]: any = await pool.query('SELECT * FROM novafreshmart_categories ORDER BY CAST(id AS UNSIGNED), id ASC');
       if (Array.isArray(remoteCats) && remoteCats.length > 0) {
-        setTimeout(() => {
-          try {
-            const insCat = db.prepare('INSERT INTO categories (id, name) VALUES (@id, @name) ON CONFLICT(id) DO UPDATE SET name = excluded.name');
-            db.transaction(() => {
-              for (const rc of remoteCats) {
-                const numId = Number(rc.id);
-                if (!isNaN(numId) && numId > 0) insCat.run({ id: numId, name: rc.name });
+        // Deduplicate remote categories by name to ensure no duplicate names can ever be returned
+        const catMap = new Map<string, any>();
+        for (const rc of remoteCats) {
+          if (!rc.name || !rc.name.trim()) continue;
+          const key = rc.name.trim().toLowerCase();
+          if (!catMap.has(key)) {
+            catMap.set(key, rc);
+          }
+        }
+        const deduped = Array.from(catMap.values());
+
+        // Sync deduplicated categories into local SQLite safely
+        try {
+          db.transaction(() => {
+            for (const rc of deduped) {
+              const numId = Number(rc.id);
+              const cleanName = rc.name.trim();
+              if (!isNaN(numId) && numId > 0) {
+                const existingByName: any = db.prepare('SELECT id FROM categories WHERE LOWER(TRIM(name)) = LOWER(?)').get(cleanName);
+                if (existingByName) {
+                  db.prepare('UPDATE categories SET color = ?, icon = ?, remote_id = ? WHERE id = ?').run(rc.color || '', rc.icon || '', String(rc.id), existingByName.id);
+                } else {
+                  db.prepare('INSERT OR IGNORE INTO categories (id, name, color, icon, remote_id) VALUES (?, ?, ?, ?, ?)').run(numId, cleanName, rc.color || '', rc.icon || '', String(rc.id));
+                }
               }
-            })();
-          } catch (_) {}
-        }, 10);
-        return remoteCats.map((c: any) => ({
-          id: Number(c.id) || c.id,
-          name: c.name,
-          color: c.color || '',
-          icon: c.icon || ''
-        }));
+            }
+          })();
+        } catch (_) {}
+
+        // Return clean categories mapped to valid local SQLite IDs
+        return deduped.map((c: any) => {
+          const localCat: any = db.prepare('SELECT id FROM categories WHERE LOWER(TRIM(name)) = LOWER(?)').get(c.name.trim());
+          return {
+            id: localCat ? localCat.id : (Number(c.id) || c.id),
+            name: c.name.trim(),
+            color: c.color || '',
+            icon: c.icon || ''
+          };
+        });
       }
     }
   } catch (err: any) {
     console.warn('[get-categories] Remote fallback to local:', err.message);
   }
-  return db.prepare('SELECT * FROM categories').all();
+  return db.prepare('SELECT * FROM categories ORDER BY name ASC').all();
 })
   ipcMain.handle('add-category', async (_, { name, parent_id }) => {
     const res = db.prepare('INSERT INTO categories (name, parent_id) VALUES (?, ?)').run(name, parent_id || null);
@@ -1318,20 +1340,21 @@ ipcMain.handle('get-categories', async () => {
       const isOnline = await checkRemoteConnection(2000);
       if (isOnline) {
         const pool = getRemotePool();
+        const nowSriLanka = getSriLankaNowString();
         for (const item of items) {
           if (!item.is_damaged && item.return_condition !== 'damage' && item.qtyToRefund > 0) {
             await pool.query('UPDATE novafreshmart_products SET stock = stock + ?, updated_at = NOW() WHERE id = ?', [Number(item.qtyToRefund), String(item.id)]).catch(() => {});
             await pool.query(`
               INSERT INTO novafreshmart_inventory_ledger 
                 (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at)
-              VALUES (?, 'REFUND', ?, ?, (SELECT stock FROM novafreshmart_products WHERE id = ?), NULL, ?, 'Supervisor', NOW())
-            `, [String(item.id), `INV-${invoiceId}`, Number(item.qtyToRefund), String(item.id), `Direct Refund for INV-${invoiceId}`]).catch(() => {});
+              VALUES (?, 'REFUND', ?, ?, (SELECT stock FROM novafreshmart_products WHERE id = ?), NULL, ?, 'Supervisor', ?)
+            `, [String(item.id), `INV-${invoiceId}`, Number(item.qtyToRefund), String(item.id), `Direct Refund for INV-${invoiceId}`, nowSriLanka]).catch(() => {});
           } else if (item.is_damaged || item.return_condition === 'damage') {
             await pool.query(`
               INSERT INTO novafreshmart_inventory_ledger 
                 (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at)
-              VALUES (?, 'DAMAGE', ?, 0, (SELECT stock FROM novafreshmart_products WHERE id = ?), NULL, ?, 'Supervisor', NOW())
-            `, [String(item.id), `INV-${invoiceId}`, `Damaged Return for INV-${invoiceId}`]).catch(() => {});
+              VALUES (?, 'DAMAGE', ?, 0, (SELECT stock FROM novafreshmart_products WHERE id = ?), NULL, ?, 'Supervisor', ?)
+            `, [String(item.id), `INV-${invoiceId}`, `Damaged Return for INV-${invoiceId}`, nowSriLanka]).catch(() => {});
           }
         }
         await pool.query("INSERT INTO novafreshmart_settings (key_name, value_text, updated_at) VALUES ('catalog_last_updated', NOW(), NOW()) ON DUPLICATE KEY UPDATE value_text = NOW(), updated_at = NOW()").catch(() => {});
@@ -1649,7 +1672,8 @@ ipcMain.handle('get-categories', async () => {
         }
 
         const allKeys = new Set([...oldQtyMap.keys(), ...newQtyMap.keys()]);
-        const ledgerStmt = db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+        const nowSriLanka = getSriLankaNowString();
+        const ledgerStmt = db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)');
 
         for (const key of allKeys) {
           const oldInfo = oldQtyMap.get(key) || { qty: 0, id: 0, variantId: 0, name: '' };
@@ -1675,7 +1699,8 @@ ipcMain.handle('get-categories', async () => {
                 p?.stock || 0,
                 p?.cost_price || 0,
                 `Invoice #${inv.invoice_no || inv.id} edited (${oldInfo.name}): Qty ${oldInfo.qty} -> ${newInfo.qty}`,
-                cashier || 'Admin'
+                cashier || 'Admin',
+                nowSriLanka
               );
             } catch (stockErr) {
               console.warn('[update-invoice] Stock adjustment error:', stockErr);
@@ -1872,125 +1897,19 @@ ipcMain.handle('get-categories', async () => {
 
   ipcMain.handle('get-products-advanced', async () => {
     try {
-      const isOnline = await checkRemoteConnection(3000);
-      if (isOnline) {
-        const pool = getRemotePool();
-        const [remoteProds]: any = await pool.query(`
-          SELECT p.*, COALESCE(p.category, c.name, 'General') as category_name
-          FROM novafreshmart_products p
-          LEFT JOIN novafreshmart_categories c ON c.id = p.category_id
-          WHERE p.is_active = 1
-          ORDER BY p.name ASC
-        `);
+      let products: any[] = db.prepare('SELECT p.*, COALESCE(c.name, "General") as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC').all();
 
-        if (Array.isArray(remoteProds)) {
-          const activeIds = new Set(remoteProds.map((rp: any) => Number(rp.id)).filter(id => !isNaN(id) && id > 0));
-
-          // Asynchronously purge deleted products from local SQLite cache and sync active items
-          setTimeout(() => {
-            try {
-              db.transaction(() => {
-                // 1. Purge any products deleted from cloud
-                const localProds = db.prepare('SELECT id FROM products').all() as any[];
-                for (const lp of localProds) {
-                  if (!activeIds.has(Number(lp.id))) {
-                    db.prepare('DELETE FROM products WHERE id = ?').run(lp.id);
-                    db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(lp.id);
-                    db.prepare('DELETE FROM product_batches WHERE product_id = ?').run(lp.id);
-                  }
-                }
-
-                // 2. Insert or update active products
-                const insOrUpdate = db.prepare(`
-                  INSERT INTO products (id, name, price, wholesale_price, cost_price, barcode, branch_id, unit, stock, category_id, is_scale_item, plu, allow_price_override, expiry_date, synced)
-                  VALUES (@id, @name, @price, @wholesale_price, @cost_price, @barcode, @branch_id, @unit, @stock, @category_id, @is_scale_item, @plu, @allow_price_override, @expiry_date, 1)
-                  ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    price = excluded.price,
-                    wholesale_price = excluded.wholesale_price,
-                    cost_price = excluded.cost_price,
-                    barcode = excluded.barcode,
-                    branch_id = excluded.branch_id,
-                    unit = excluded.unit,
-                    stock = excluded.stock,
-                    category_id = excluded.category_id,
-                    is_scale_item = excluded.is_scale_item,
-                    plu = excluded.plu,
-                    allow_price_override = excluded.allow_price_override,
-                    expiry_date = excluded.expiry_date,
-                    synced = 1
-                `);
-                for (const rp of remoteProds) {
-                  const numId = Number(rp.id);
-                  if (!isNaN(numId) && numId > 0) {
-                    insOrUpdate.run({
-                      id: numId,
-                      name: rp.name,
-                      price: Number(rp.price || 0),
-                      wholesale_price: Number(rp.wholesale_price || 0),
-                      cost_price: Number(rp.cost_price || 0),
-                      barcode: rp.barcode || '',
-                      branch_id: rp.branch_id || 'ALL',
-                      unit: rp.unit || 'pc',
-                      stock: Number(rp.stock || 0),
-                      category_id: Number(rp.category_id) || 1,
-                      is_scale_item: rp.is_scale_item ? 1 : 0,
-                      plu: rp.plu || null,
-                      allow_price_override: rp.allow_price_override !== 0 ? 1 : 0,
-                      expiry_date: rp.expiry_date || null
-                    });
-                  }
-                }
-              })();
-            } catch (_) {}
-          }, 10);
-
-          let variants: any[] = [];
-          try { variants = db.prepare('SELECT * FROM product_variants').all() as any[]; } catch (_) {}
-          let batches: any[] = [];
-          try { batches = db.prepare('SELECT * FROM product_batches').all() as any[]; } catch (_) {}
-
-          const variantMap = new Map<number, any[]>()
-          for (const v of variants as any[]) {
-            const arr = variantMap.get(v.product_id) || []
-            arr.push(v)
-            variantMap.set(v.product_id, arr)
+      // If local cache is empty (e.g. brand new installation), pull from cloud once
+      if (products.length === 0) {
+        try {
+          const isOnline = await checkRemoteConnection(2000);
+          if (isOnline) {
+            await pullLatestData(db);
+            products = db.prepare('SELECT p.*, COALESCE(c.name, "General") as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC').all();
           }
-
-          const batchMap = new Map<number, any[]>()
-          for (const b of batches as any[]) {
-            const arr = batchMap.get(b.product_id) || []
-            arr.push(b)
-            batchMap.set(b.product_id, arr)
-          }
-
-          return remoteProds.map((rp: any) => ({
-            id: Number(rp.id) || rp.id,
-            name: rp.name,
-            price: Number(rp.price || 0),
-            wholesale_price: Number(rp.wholesale_price || 0),
-            cost_price: Number(rp.cost_price || 0),
-            barcode: rp.barcode || '',
-            branch_id: rp.branch_id || 'ALL',
-            unit: rp.unit || 'pc',
-            stock: Number(rp.stock || 0),
-            category_id: Number(rp.category_id) || 1,
-            category_name: rp.category_name || 'General',
-            is_scale_item: rp.is_scale_item ? 1 : 0,
-            plu: rp.plu || null,
-            allow_price_override: rp.allow_price_override !== 0 ? 1 : 0,
-            expiry_date: rp.expiry_date || null,
-            variants: variantMap.get(Number(rp.id)) || [],
-            batches: batchMap.get(Number(rp.id)) || []
-          }));
-        }
+        } catch (_) {}
       }
-    } catch (err: any) {
-      console.warn('[get-products-advanced] Remote fallback to local:', err.message);
-    }
 
-    try {
-      const products = db.prepare('SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.id ASC').all()
       let variants: any[] = [];
       try { variants = db.prepare('SELECT * FROM product_variants').all() as any[]; } catch (_) {}
       let batches: any[] = [];
@@ -2037,11 +1956,41 @@ ipcMain.handle('get-categories', async () => {
     const safeUnit = (product.unit && !/^\d+$/.test(String(product.unit).trim())) ? product.unit : 'pc';
     const allowOverride = product.allow_price_override !== 0 && product.allow_price_override !== false ? 1 : 0;
     const lowStockAlert = (product.low_stock_alert !== undefined && product.low_stock_alert !== null && product.low_stock_alert !== '') ? Number(product.low_stock_alert) : 2;
-    const catRow: any = product.category_id ? db.prepare('SELECT name FROM categories WHERE id = ?').get(product.category_id) : null;
-    const catName = catRow?.name || 'General';
+    let safeCategoryId: number = 1;
+    let catName = 'General';
+
+    if (product.category_id) {
+      const catById: any = db.prepare('SELECT id, name FROM categories WHERE id = ?').get(product.category_id);
+      if (catById) {
+        safeCategoryId = Number(catById.id);
+        catName = catById.name;
+      }
+    }
+
+    if (safeCategoryId === 1 && (product.category || product.category_name)) {
+      const targetName = String(product.category || product.category_name).trim();
+      const catByName: any = db.prepare('SELECT id, name FROM categories WHERE LOWER(TRIM(name)) = LOWER(?)').get(targetName);
+      if (catByName) {
+        safeCategoryId = Number(catByName.id);
+        catName = catByName.name;
+      }
+    }
+
+    const verifyCat: any = db.prepare('SELECT id, name FROM categories WHERE id = ?').get(safeCategoryId);
+    if (!verifyCat) {
+      const fallbackCat: any = db.prepare('SELECT id, name FROM categories ORDER BY id ASC LIMIT 1').get();
+      if (fallbackCat) {
+        safeCategoryId = Number(fallbackCat.id);
+        catName = fallbackCat.name;
+      } else {
+        const ins = db.prepare('INSERT INTO categories (name) VALUES ("General")').run();
+        safeCategoryId = Number(ins.lastInsertRowid);
+        catName = 'General';
+      }
+    }
 
     const res = db.prepare('UPDATE products SET name = ?, price = ?, cost_price = ?, barcode = ?, item_code = ?, low_stock_alert = ?, category_id = ?, brand_id = ?, supplier_id = ?, has_variants = ?, requires_batch = ?, image_data = ?, size = ?, color = ?, expiry_date = ?, branch_id = ?, wholesale_price = ?, unit = ?, is_scale_item = ?, plu = ?, allow_price_override = ?, synced = 0 WHERE id = ?')
-      .run(product.name, product.price, product.cost_price, product.barcode || null, product.item_code || null, lowStockAlert, product.category_id || 1, product.brand_id || null, product.supplier_id || null, product.has_variants ? 1 : 0, product.requires_batch ? 1 : 0, product.image_data || null, product.size || null, product.color || null, product.expiry_date || null, product.branch_id || 'ALL', product.wholesale_price || 0, safeUnit, product.is_scale_item ? 1 : 0, product.plu || null, allowOverride, product.id);
+      .run(product.name, product.price, product.cost_price, product.barcode || null, product.item_code || null, lowStockAlert, safeCategoryId, product.brand_id || null, product.supplier_id || null, product.has_variants ? 1 : 0, product.requires_batch ? 1 : 0, product.image_data || null, product.size || null, product.color || null, product.expiry_date || null, product.branch_id || 'ALL', product.wholesale_price || 0, safeUnit, product.is_scale_item ? 1 : 0, product.plu || null, allowOverride, product.id);
 
     try {
       const isOnline = await checkRemoteConnection(2000);
@@ -2072,7 +2021,7 @@ ipcMain.handle('get-categories', async () => {
           product.barcode || '',
           product.name,
           catName,
-          String(product.category_id || 1),
+          String(safeCategoryId),
           product.price,
           product.wholesale_price || 0,
           product.cost_price || 0,
@@ -2154,103 +2103,22 @@ ipcMain.on('show-confirm', (event, msg) => {
 
 ipcMain.handle('get-products', async () => {
   try {
-    const isOnline = await checkRemoteConnection(1500);
-    if (isOnline) {
-      const pool = getRemotePool();
-      const [remoteProds]: any = await pool.query(`
-        SELECT p.*, COALESCE(p.category, c.name, 'General') as category_name
-        FROM novafreshmart_products p
-        LEFT JOIN novafreshmart_categories c ON c.id = p.category_id
-        WHERE p.is_active = 1
-        ORDER BY p.name ASC
-      `);
-      if (Array.isArray(remoteProds) && remoteProds.length > 0) {
-        // Asynchronously update local SQLite cache so offline billing is always ready
-        setTimeout(() => {
-          try {
-            const insOrUpdate = db.prepare(`
-              INSERT INTO products (id, name, price, wholesale_price, cost_price, barcode, branch_id, unit, stock, category_id, is_scale_item, plu, allow_price_override, expiry_date, synced)
-              VALUES (@id, @name, @price, @wholesale_price, @cost_price, @barcode, @branch_id, @unit, @stock, @category_id, @is_scale_item, @plu, @allow_price_override, @expiry_date, 1)
-              ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                price = excluded.price,
-                wholesale_price = excluded.wholesale_price,
-                cost_price = excluded.cost_price,
-                barcode = excluded.barcode,
-                branch_id = excluded.branch_id,
-                unit = excluded.unit,
-                stock = excluded.stock,
-                category_id = excluded.category_id,
-                is_scale_item = excluded.is_scale_item,
-                plu = excluded.plu,
-                allow_price_override = excluded.allow_price_override,
-                expiry_date = excluded.expiry_date,
-                synced = 1
-            `);
-            const activeIds = new Set(remoteProds.map((rp: any) => Number(rp.id)).filter(id => !isNaN(id) && id > 0));
-            db.transaction(() => {
-              // 1. Purge deleted/inactive products from local cache
-              const localProds = db.prepare('SELECT id FROM products').all() as any[];
-              for (const lp of localProds) {
-                if (!activeIds.has(Number(lp.id))) {
-                  db.prepare('DELETE FROM products WHERE id = ?').run(lp.id);
-                  db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(lp.id);
-                  db.prepare('DELETE FROM product_batches WHERE product_id = ?').run(lp.id);
-                }
-              }
-
-              // 2. Insert or update active products
-              for (const rp of remoteProds) {
-                const numId = Number(rp.id);
-                if (!isNaN(numId) && numId > 0) {
-                  insOrUpdate.run({
-                    id: numId,
-                    name: rp.name,
-                    price: Number(rp.price || 0),
-                    wholesale_price: Number(rp.wholesale_price || 0),
-                    cost_price: Number(rp.cost_price || 0),
-                    barcode: rp.barcode || '',
-                    branch_id: rp.branch_id || 'ALL',
-                    unit: rp.unit || 'pc',
-                    stock: Number(rp.stock || 0),
-                    category_id: Number(rp.category_id) || 1,
-                    is_scale_item: rp.is_scale_item ? 1 : 0,
-                    plu: rp.plu || null,
-                    allow_price_override: rp.allow_price_override !== 0 ? 1 : 0,
-                    expiry_date: rp.expiry_date || null
-                  });
-                }
-              }
-            })();
-          } catch (_) {}
-        }, 10);
-
-        return remoteProds.map((rp: any) => ({
-          id: Number(rp.id) || rp.id,
-          name: rp.name,
-          price: Number(rp.price || 0),
-          wholesale_price: Number(rp.wholesale_price || 0),
-          cost_price: Number(rp.cost_price || 0),
-          barcode: rp.barcode || '',
-          branch_id: rp.branch_id || 'ALL',
-          unit: rp.unit || 'pc',
-          stock: Number(rp.stock || 0),
-          category_id: Number(rp.category_id) || 1,
-          category_name: rp.category_name || 'General',
-          is_scale_item: rp.is_scale_item ? 1 : 0,
-          plu: rp.plu || null,
-          allow_price_override: rp.allow_price_override !== 0 ? 1 : 0,
-          expiry_date: rp.expiry_date || null
-        }));
-      }
+    let products: any[] = db.prepare('SELECT p.*, COALESCE(c.name, "General") as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC').all();
+    if (products.length === 0) {
+      try {
+        const isOnline = await checkRemoteConnection(2000);
+        if (isOnline) {
+          await pullLatestData(db);
+          products = db.prepare('SELECT p.*, COALESCE(c.name, "General") as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name ASC').all();
+        }
+      } catch (_) {}
     }
-  } catch (err: any) {
-    console.warn('[get-products] Remote fetch fallback to local SQLite cache:', err.message);
+    return products;
+  } catch (err) {
+    console.error('get-products error:', err);
+    return [];
   }
-
-  // Offline fallback to local SQLite cache
-  return db.prepare('SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id').all();
-})
+});
 
   ipcMain.handle('add-product', async (_, product) => {
     let productId: any = null;
@@ -2259,8 +2127,39 @@ ipcMain.handle('get-products', async () => {
     const safeUnit = (product.unit && !/^\d+$/.test(String(product.unit).trim())) ? product.unit : 'pc';
     const allowOverride = product.allow_price_override !== 0 && product.allow_price_override !== false ? 1 : 0;
     const lowStockAlert = (product.low_stock_alert !== undefined && product.low_stock_alert !== null && product.low_stock_alert !== '') ? Number(product.low_stock_alert) : 2;
-    const catRow: any = product.category_id ? db.prepare('SELECT name FROM categories WHERE id = ?').get(product.category_id) : null;
-    const catName = catRow?.name || 'General';
+    let safeCategoryId: number = 1;
+    let catName = 'General';
+
+    if (product.category_id) {
+      const catById: any = db.prepare('SELECT id, name FROM categories WHERE id = ?').get(product.category_id);
+      if (catById) {
+        safeCategoryId = Number(catById.id);
+        catName = catById.name;
+      }
+    }
+
+    if (safeCategoryId === 1 && (product.category || product.category_name)) {
+      const targetName = String(product.category || product.category_name).trim();
+      const catByName: any = db.prepare('SELECT id, name FROM categories WHERE LOWER(TRIM(name)) = LOWER(?)').get(targetName);
+      if (catByName) {
+        safeCategoryId = Number(catByName.id);
+        catName = catByName.name;
+      }
+    }
+
+    // Verify safeCategoryId actually exists in SQLite categories table so FOREIGN KEY constraint can never fail
+    const verifyCat: any = db.prepare('SELECT id, name FROM categories WHERE id = ?').get(safeCategoryId);
+    if (!verifyCat) {
+      const fallbackCat: any = db.prepare('SELECT id, name FROM categories ORDER BY id ASC LIMIT 1').get();
+      if (fallbackCat) {
+        safeCategoryId = Number(fallbackCat.id);
+        catName = fallbackCat.name;
+      } else {
+        const ins = db.prepare('INSERT INTO categories (name) VALUES ("General")').run();
+        safeCategoryId = Number(ins.lastInsertRowid);
+        catName = 'General';
+      }
+    }
 
     // 1. Determine safe Next Product ID across local SQLite and remote MariaDB to avoid ID collisions
     let safeNextId: number | null = null;
@@ -2283,14 +2182,14 @@ ipcMain.handle('get-products', async () => {
     db.transaction(() => {
       if (safeNextId && safeNextId > 0) {
         const insertProductWithId = db.prepare('INSERT INTO products (id, name, price, cost_price, stock, barcode, item_code, low_stock_alert, category_id, brand_id, supplier_id, has_variants, requires_batch, image_data, size, color, expiry_date, branch_id, wholesale_price, unit, is_scale_item, plu, allow_price_override, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)');
-        insertProductWithId.run(safeNextId, product.name, product.price, product.cost_price, product.stock, barcode || null, itemCode || null, lowStockAlert, product.category_id || 1, product.brand_id || null, product.supplier_id || null, product.has_variants ? 1 : 0, product.requires_batch ? 1 : 0, product.image_data || null, product.size || null, product.color || null, product.expiry_date || null, product.branch_id || 'ALL', product.wholesale_price || 0, safeUnit, product.is_scale_item ? 1 : 0, product.plu || null, allowOverride);
+        insertProductWithId.run(safeNextId, product.name, product.price, product.cost_price, product.stock, barcode || null, itemCode || null, lowStockAlert, safeCategoryId, product.brand_id || null, product.supplier_id || null, product.has_variants ? 1 : 0, product.requires_batch ? 1 : 0, product.image_data || null, product.size || null, product.color || null, product.expiry_date || null, product.branch_id || 'ALL', product.wholesale_price || 0, safeUnit, product.is_scale_item ? 1 : 0, product.plu || null, allowOverride);
         productId = safeNextId;
         try {
           db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('products', ?) ON CONFLICT(name) DO UPDATE SET seq = MAX(seq, excluded.seq)").run(safeNextId);
         } catch (_) {}
       } else {
         const insertProduct = db.prepare('INSERT INTO products (name, price, cost_price, stock, barcode, item_code, low_stock_alert, category_id, brand_id, supplier_id, has_variants, requires_batch, image_data, size, color, expiry_date, branch_id, wholesale_price, unit, is_scale_item, plu, allow_price_override, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)');
-        const info = insertProduct.run(product.name, product.price, product.cost_price, product.stock, barcode || null, itemCode || null, lowStockAlert, product.category_id || 1, product.brand_id || null, product.supplier_id || null, product.has_variants ? 1 : 0, product.requires_batch ? 1 : 0, product.image_data || null, product.size || null, product.color || null, product.expiry_date || null, product.branch_id || 'ALL', product.wholesale_price || 0, safeUnit, product.is_scale_item ? 1 : 0, product.plu || null, allowOverride);
+        const info = insertProduct.run(product.name, product.price, product.cost_price, product.stock, barcode || null, itemCode || null, lowStockAlert, safeCategoryId, product.brand_id || null, product.supplier_id || null, product.has_variants ? 1 : 0, product.requires_batch ? 1 : 0, product.image_data || null, product.size || null, product.color || null, product.expiry_date || null, product.branch_id || 'ALL', product.wholesale_price || 0, safeUnit, product.is_scale_item ? 1 : 0, product.plu || null, allowOverride);
         productId = info.lastInsertRowid;
       }
       
@@ -2301,8 +2200,9 @@ ipcMain.handle('get-products', async () => {
         db.prepare('UPDATE products SET barcode = ?, item_code = ? WHERE id = ?').run(barcode, itemCode, productId);
       }
 
+      const nowSriLanka = getSriLankaNowString();
       if (product.stock > 0) {
-        db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, qty_change, balance_after, notes, created_by) VALUES (?, ?, ?, ?, ?, ?)').run(productId, 'ADJUSTMENT', product.stock, product.stock, 'Opening Stock', 'System');
+        db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, qty_change, balance_after, notes, created_by, created_at, synced) VALUES (?, ?, ?, ?, ?, ?, ?, 0)').run(productId, 'ADJUSTMENT', product.stock, product.stock, 'Opening Stock', 'System', nowSriLanka);
       }
     })();
 
@@ -2311,6 +2211,7 @@ ipcMain.handle('get-products', async () => {
       const isOnline = await checkRemoteConnection(2000);
       if (isOnline) {
         const pool = getRemotePool();
+        const nowSriLanka = getSriLankaNowString();
         await pool.query(`
           INSERT INTO novafreshmart_products (id, branch_id, barcode, name, category, category_id, price, wholesale_price, cost_price, stock, unit, is_scale_item, plu, allow_price_override, expiry_date, is_active, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())
@@ -2337,7 +2238,7 @@ ipcMain.handle('get-products', async () => {
           barcode || '',
           product.name,
           catName,
-          String(product.category_id || 1),
+          String(safeCategoryId),
           product.price,
           product.wholesale_price || 0,
           product.cost_price || 0,
@@ -2353,8 +2254,11 @@ ipcMain.handle('get-products', async () => {
           await pool.query(`
             INSERT INTO novafreshmart_inventory_ledger 
               (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at)
-            VALUES (?, 'ADJUSTMENT', NULL, ?, ?, ?, 'Opening Stock', 'System', NOW())
-          `, [String(productId), product.stock, product.stock, product.cost_price || 0]).catch(() => {});
+            VALUES (?, 'ADJUSTMENT', NULL, ?, ?, ?, 'Opening Stock', 'System', ?)
+          `, [String(productId), product.stock, product.stock, product.cost_price || 0, nowSriLanka]).catch(() => {});
+          try {
+            db.prepare("UPDATE inventory_ledger SET synced = 1 WHERE product_id = ? AND notes = 'Opening Stock'").run(productId);
+          } catch (_) {}
         }
 
         // Only mark synced=1 AFTER confirmed remote write
@@ -3032,7 +2936,7 @@ ipcMain.handle('checkout', async (_, {
       cash_paid, card_paid, other_paid, balance_due, change_returned, cashier, synced, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
   `);
-  const ledgerStmt = db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+  const ledgerStmt = db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)');
 
   let invoiceId = 0;
   
@@ -3221,7 +3125,7 @@ ipcMain.handle('checkout', async (_, {
         }
 
         const p = db.prepare('SELECT stock, cost_price FROM products WHERE id = ?').get(item.id) as any;
-        ledgerStmt.run(item.id, type, invoiceId, change, p?.stock || 0, p?.cost_price || 0, notes, cashier);
+        ledgerStmt.run(item.id, type, invoiceId, change, p?.stock || 0, p?.cost_price || 0, notes, cashier, nowStr);
       }
     }
   })
@@ -3324,7 +3228,7 @@ ipcMain.handle('checkout', async (_, {
         await pool.query(`
           INSERT INTO novafreshmart_inventory_ledger 
             (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
           String(item.id),
           ledgerType,
@@ -3333,8 +3237,12 @@ ipcMain.handle('checkout', async (_, {
           currentBalance,
           unitCost,
           ledgerNotes,
-          cashier
+          cashier,
+          nowStr
         ]).catch(() => {});
+        try {
+          db.prepare('UPDATE inventory_ledger SET synced = 1 WHERE reference_id = ? AND product_id = ?').run(invoiceId, item.id);
+        } catch (_) {}
       }
 
       // 3. Mark local invoice as synced
@@ -5228,7 +5136,8 @@ ipcMain.handle('update-po-status', async (_, { id, status, approvedBy, rejection
       finalStock = Number(product.stock || 0) + Number(qty || 0);
       db.prepare('UPDATE products SET stock = ?, synced = 0 WHERE id = ?').run(finalStock, productId);
       
-      db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, qty_change, balance_after, notes, created_by, synced) VALUES (?, ?, ?, ?, ?, ?, 0)').run(productId, type, qty, finalStock, reason, user);
+      const nowSriLanka = getSriLankaNowString();
+      db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, qty_change, balance_after, notes, created_by, created_at, synced) VALUES (?, ?, ?, ?, ?, ?, ?, 0)').run(productId, type, qty, finalStock, reason, user, nowSriLanka);
       return { success: true, newStock: finalStock };
     })();
 
@@ -5236,12 +5145,16 @@ ipcMain.handle('update-po-status', async (_, { id, status, approvedBy, rejection
       const isOnline = await checkRemoteConnection(2000);
       if (isOnline) {
         const pool = getRemotePool();
+        const nowSriLanka = getSriLankaNowString();
         await pool.query('UPDATE novafreshmart_products SET stock = ?, updated_at = NOW() WHERE id = ?', [finalStock, String(productId)]);
         await pool.query(`
           INSERT INTO novafreshmart_inventory_ledger 
             (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at)
-          VALUES (?, ?, NULL, ?, ?, NULL, ?, ?, NOW())
-        `, [String(productId), type, qty, finalStock, reason || null, user || 'System']).catch(() => {});
+          VALUES (?, ?, NULL, ?, ?, NULL, ?, ?, ?)
+        `, [String(productId), type, qty, finalStock, reason || null, user || 'System', nowSriLanka]).catch(() => {});
+        try {
+          db.prepare("UPDATE inventory_ledger SET synced = 1 WHERE product_id = ? AND notes = ?").run(productId, reason);
+        } catch (_) {}
         await pool.query("INSERT INTO novafreshmart_settings (key_name, value_text, updated_at) VALUES ('catalog_last_updated', NOW(), NOW()) ON DUPLICATE KEY UPDATE value_text = NOW(), updated_at = NOW()").catch(() => {});
         db.prepare('UPDATE products SET synced = 1 WHERE id = ?').run(productId);
       }
@@ -5582,8 +5495,8 @@ ipcMain.handle('process-grn', async (_, { poId, supplierId, totalCost, items, in
         }
 
         const afterStock = db.prepare('SELECT stock FROM products WHERE id = ?').get(item.productId) as any
-        
-        db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+        const nowSriLanka = getSriLankaNowString();
+        db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)').run(
           item.productId,
           'GRN',
           poId || newGrnId,
@@ -5591,7 +5504,8 @@ ipcMain.handle('process-grn', async (_, { poId, supplierId, totalCost, items, in
           afterStock?.stock || 0,
           costToApply,
           'GRN received for PO-' + String(poId || 0).padStart(4, '0') + (freeQty > 0 ? ` (+${freeQty} Free Bonus)` : ''),
-          approvedBy || 'Admin Manager'
+          approvedBy || 'Admin Manager',
+          nowSriLanka
         )
       }
     }
@@ -5686,10 +5600,11 @@ ipcMain.handle('process-grn', async (_, { poId, supplierId, totalCost, items, in
             prod?.barcode || ''
           ]).catch(() => {});
 
+          const nowSriLanka = getSriLankaNowString();
           await pool.query(`
             INSERT INTO novafreshmart_inventory_ledger 
               (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at)
-            VALUES (?, 'GRN', ?, ?, ?, ?, ?, ?, NOW())
+            VALUES (?, 'GRN', ?, ?, ?, ?, ?, ?, ?)
           `, [
             String(item.productId),
             grnRemoteId,
@@ -5697,8 +5612,12 @@ ipcMain.handle('process-grn', async (_, { poId, supplierId, totalCost, items, in
             currentStock,
             costToApply,
             'GRN received for PO-' + String(poId || 0).padStart(4, '0') + (freeQty > 0 ? ` (+${freeQty} Free Bonus)` : ''),
-            approvedBy || 'Admin Manager'
+            approvedBy || 'Admin Manager',
+            nowSriLanka
           ]).catch(() => {});
+          try {
+            db.prepare('UPDATE inventory_ledger SET synced = 1 WHERE reference_id = ? AND product_id = ?').run(poId || newGrnId, item.productId);
+          } catch (_) {}
 
           try { db.prepare('UPDATE products SET synced = 1 WHERE id = ?').run(item.productId); } catch(_) {}
         }
@@ -5797,8 +5716,9 @@ ipcMain.handle('approve-grn', async (_, { grnId, approvedBy }: any = {}) => {
         }
 
         const afterStock: any = db.prepare('SELECT stock FROM products WHERE id = ?').get(item.product_id);
-        db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
-          item.product_id, 'GRN', grn.po_id || grnId, totalQty, afterStock?.stock || 0, costToApply, `GRN-${grnId} Approved by ${approvedBy || 'Admin'}${freeQty > 0 ? ` (+${freeQty} Free Bonus)` : ''}`, approvedBy || 'Admin'
+        const nowSriLanka = getSriLankaNowString();
+        db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)').run(
+          item.product_id, 'GRN', grn.po_id || grnId, totalQty, afterStock?.stock || 0, costToApply, `GRN-${grnId} Approved by ${approvedBy || 'Admin'}${freeQty > 0 ? ` (+${freeQty} Free Bonus)` : ''}`, approvedBy || 'Admin', nowSriLanka
         );
       }
 
@@ -5832,10 +5752,11 @@ ipcMain.handle('approve-grn', async (_, { grnId, approvedBy }: any = {}) => {
             // Real-time write to novafreshmart_inventory_ledger
             const totalQty = (Number(item.qty_received) || 0) + (Number(item.free_qty) || 0);
             const cost = Number(item.effective_cost || item.unit_cost || 0);
+            const nowSriLanka = getSriLankaNowString();
             await pool.query(`
               INSERT INTO novafreshmart_inventory_ledger 
                 (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at)
-              VALUES (?, 'GRN', ?, ?, ?, ?, ?, ?, NOW())
+              VALUES (?, 'GRN', ?, ?, ?, ?, ?, ?, ?)
             `, [
               String(item.product_id),
               grnRemoteId,
@@ -5843,8 +5764,12 @@ ipcMain.handle('approve-grn', async (_, { grnId, approvedBy }: any = {}) => {
               Number(prod.stock || 0),
               cost,
               `GRN-${grnId} Approved by ${approvedBy || 'Admin'}${item.free_qty > 0 ? ` (+${item.free_qty} Free Bonus)` : ''}`,
-              approvedBy || 'Admin'
+              approvedBy || 'Admin',
+              nowSriLanka
             ]).catch((e: any) => console.warn('[approve-grn] ledger insert error:', e.message));
+            try {
+              db.prepare('UPDATE inventory_ledger SET synced = 1 WHERE reference_id = ? AND product_id = ?').run(grn.po_id || grnId, item.product_id);
+            } catch (_) {}
           }
         }
 

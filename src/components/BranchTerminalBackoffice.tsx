@@ -181,7 +181,7 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
 
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 15000);
+    const interval = setInterval(loadData, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -2093,7 +2093,7 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                               {isTxIn ? '+' : '-'}Rs. {Number(tx.amount || 0).toFixed(2)}
                             </span>
                             <span className="block text-[9px] text-gray-400 font-mono">
-                              {tx.created_at ? new Date(tx.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                              {tx.created_at ? formatSriLankaDateTime(tx.created_at, { timeOnly: true }) : ''}
                             </span>
                           </div>
                         </div>

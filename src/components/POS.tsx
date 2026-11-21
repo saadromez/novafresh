@@ -340,7 +340,7 @@ export default function POS({ currentUser, onUserChange, onExitToBackoffice, onN
 
     const syncInterval = setInterval(() => {
       loadSyncAndTerminal();
-    }, 15000);
+    }, 30000);
 
     const handleSyncCompleted = () => {
       loadSyncAndTerminal();

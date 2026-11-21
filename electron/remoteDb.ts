@@ -11,7 +11,8 @@ export const REMOTE_DB_CONFIG = {
   connectionLimit: 25,
   queueLimit: 0,
   enableKeepAlive: true,
-  keepAliveInitialDelay: 10000
+  keepAliveInitialDelay: 10000,
+  dateStrings: true
 };
 
 let pool: mysql.Pool | null = null;

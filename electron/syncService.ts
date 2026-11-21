@@ -1,6 +1,7 @@
 import { BrowserWindow } from 'electron';
 import Database from 'better-sqlite3';
 import { getRemotePool, checkRemoteConnection, initRemoteTables, getRemoteStatus } from './remoteDb';
+import { getSriLankaNowString } from './dateUtils';
 
 let syncInterval: NodeJS.Timeout | null = null;
 let isSyncing = false;
@@ -1437,7 +1438,7 @@ export async function pushUnsyncedData(db: Database.Database) {
         entry.unit_cost !== null && entry.unit_cost !== undefined ? Number(entry.unit_cost) : null,
         entry.notes || null,
         entry.created_by || 'System',
-        entry.created_at ? new Date(entry.created_at).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' ')
+        entry.created_at ? String(entry.created_at).replace('T', ' ').slice(0, 19) : getSriLankaNowString()
       ]);
 
       const remoteInsertId = res?.insertId ? String(res.insertId) : `REM-LEDGER-${entry.id}`;
@@ -2898,7 +2899,7 @@ export async function pullLatestData(db: Database.Database) {
           if (!prod) continue;
 
           const localProdId = prod.id;
-          const createdAtStr = row.created_at ? new Date(row.created_at).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' ');
+          const createdAtStr = row.created_at ? String(row.created_at).replace('T', ' ').slice(0, 19) : getSriLankaNowString();
           const refId = row.reference_id ? (Number(String(row.reference_id).replace(/[^0-9]/g, '')) || null) : null;
 
           const exists = findLedger.get(remoteIdStr, localProdId, row.transaction_type, row.qty_change, row.balance_after, createdAtStr);
@@ -3106,7 +3107,7 @@ export async function runFullSync(db: Database.Database) {
     await initRemoteTables();
     await processRemoteResetEvents(db);
     await pushUnsyncedData(db);
-    await pullLatestData(db);
+    await checkAndSyncCatalogLive(db);
 
     lastSyncTime = new Date().toLocaleTimeString();
     const unsyncedCount: any = db.prepare('SELECT COUNT(*) as cnt FROM invoices WHERE synced = 0').get();
@@ -3212,7 +3213,7 @@ export async function checkAndSyncCatalogLive(db: Database.Database) {
   }
 }
 
-export function startAutoSync(db: Database.Database, intervalMs = 10000) {
+export function startAutoSync(db: Database.Database, intervalMs = 30000) {
   if (syncInterval) clearInterval(syncInterval);
   if (liveWatcherInterval) clearInterval(liveWatcherInterval);
 
@@ -3224,10 +3225,10 @@ export function startAutoSync(db: Database.Database, intervalMs = 10000) {
     runFullSync(db);
   }, intervalMs);
 
-  // High-frequency live catalog watcher (checks every 3.5 seconds)
+  // High-frequency live catalog watcher (checks lightweight timestamp every 5 seconds)
   liveWatcherInterval = setInterval(() => {
     checkAndSyncCatalogLive(db);
-  }, 2000);
+  }, 5000);
 }
 
 // Branch and Terminal Management Functions

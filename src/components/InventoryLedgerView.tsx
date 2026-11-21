@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { FileText, ArrowDown, ArrowUp, AlertCircle, CheckCircle } from 'lucide-react'
+import { formatSriLankaDateTime } from '../utils/dateUtils'
 
 export default function InventoryLedgerView({ products, loadProducts, onRestock, currentUser }: any) {
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin';
@@ -195,7 +196,7 @@ export default function InventoryLedgerView({ products, loadProducts, onRestock,
                 ) : (
                   ledger.map((entry, idx) => (
                     <tr key={idx} className="hover:bg-gray-50/50 group">
-                      <td className="p-4 text-gray-500 whitespace-nowrap">{new Date(entry.created_at).toLocaleString()}</td>
+                      <td className="p-4 text-gray-600 whitespace-nowrap font-mono text-xs">{formatSriLankaDateTime(entry.created_at)}</td>
                       {!selectedProduct && <td className="p-4 font-bold text-brand-dark">{entry.product_name}</td>}
                       <td className="p-4">
                         <span className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black tracking-wider uppercase border ${getTypeColor(entry.transaction_type)}`}>
