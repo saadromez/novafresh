@@ -7272,14 +7272,15 @@ app.whenReady().then(() => {
         msg.includes('404') ||
         msg.toLowerCase().includes('releases.atom') ||
         msg.toLowerCase().includes('no published version') ||
-        msg.toLowerCase().includes('cannot find latest') ||
-        msg.toLowerCase().includes('github');
+        msg.toLowerCase().includes('cannot find latest');
 
       BrowserWindow.getAllWindows().forEach(w => {
         if (!w.isDestroyed()) {
           if (isNotFoundOrNoVersion) {
-            // If no release published yet or 404, treat as current version is latest
+            // Treat 404 or missing release as already on latest version
             w.webContents.send('update-not-available');
+          } else if (msg.toLowerCase().includes('download')) {
+            w.webContents.send('update-error', { message: 'Update server is preparing files. Please try again shortly.' });
           } else {
             w.webContents.send('update-error', { message: 'Unable to check for updates. Please check your internet connection.' });
           }

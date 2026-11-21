@@ -53,18 +53,20 @@ export default function SettingsView() {
     const onUpdateNone = () => { setUpdateStatus('none'); };
     const onUpdateError = (_: any, info: any) => {
       const rawMsg = String(info?.message || '');
-      const isNotFound =
+      if (
         rawMsg.includes('404') ||
-        rawMsg.toLowerCase().includes('github') ||
-        rawMsg.toLowerCase().includes('no published version') ||
-        rawMsg.toLowerCase().includes('releases.atom') ||
-        rawMsg.toLowerCase().includes('cannot find latest');
-
-      if (isNotFound) {
+        rawMsg.toLowerCase().includes('no published') ||
+        rawMsg.toLowerCase().includes('cannot find')
+      ) {
         setUpdateStatus('none');
         setUpdateError('');
+        return;
+      }
+
+      setUpdateStatus('error');
+      if (rawMsg.includes('http') || rawMsg.toLowerCase().includes('github') || rawMsg.toLowerCase().includes('download')) {
+        setUpdateError('Unable to download update package. Please try again shortly.');
       } else {
-        setUpdateStatus('error');
         setUpdateError('Unable to check for updates. Please check your internet connection.');
       }
     };
