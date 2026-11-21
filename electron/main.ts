@@ -7300,7 +7300,8 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('install-update-now', () => {
-    autoUpdater.quitAndInstall(false, true);
+    // isSilent: true (no external installer wizard/prompts), isForceRunAfter: true (restart immediately)
+    autoUpdater.quitAndInstall(true, true);
   });
 
   app.on('activate', () => {

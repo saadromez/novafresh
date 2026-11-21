@@ -70,6 +70,19 @@ function App() {
   const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', barcode: '' })
   const [newBatch, setNewBatch] = useState({ productId: 0, batchNo: '', expiryDate: '', quantity: 0 })
 
+  // Auto-Update Notification Bubble State
+  const [updateBubble, setUpdateBubble] = useState<{
+    status: 'idle' | 'downloading' | 'ready';
+    version: string;
+    percent: number;
+    dismissed: boolean;
+  }>({
+    status: 'idle',
+    version: '',
+    percent: 0,
+    dismissed: false,
+  });
+
   // Load device mode on mount
   useEffect(() => {
     // @ts-ignore
@@ -117,6 +130,30 @@ function App() {
       loadPOs();
       loadSession();
     };
+    const onUpdateAvailable = (_: any, info: any) => {
+      setUpdateBubble({
+        status: 'downloading',
+        version: info?.version || '',
+        percent: 0,
+        dismissed: false,
+      });
+    };
+    const onUpdateProgress = (_: any, info: any) => {
+      setUpdateBubble(prev => ({
+        ...prev,
+        status: 'downloading',
+        percent: Math.round(info?.percent || 0),
+      }));
+    };
+    const onUpdateDownloaded = (_: any, info: any) => {
+      setUpdateBubble(prev => ({
+        ...prev,
+        status: 'ready',
+        version: info?.version || prev.version,
+        dismissed: false,
+      }));
+    };
+
     // @ts-ignore
     if (window.ipcRenderer?.on) {
       // @ts-ignore
@@ -125,6 +162,12 @@ function App() {
       window.ipcRenderer.on('sync-data-updated', syncHandler);
       // @ts-ignore
       window.ipcRenderer.on('products-updated', syncHandler);
+      // @ts-ignore
+      window.ipcRenderer.on('update-available', onUpdateAvailable);
+      // @ts-ignore
+      window.ipcRenderer.on('update-download-progress', onUpdateProgress);
+      // @ts-ignore
+      window.ipcRenderer.on('update-downloaded', onUpdateDownloaded);
     }
 
     return () => {
@@ -139,6 +182,12 @@ function App() {
         window.ipcRenderer.off('sync-data-updated', syncHandler);
         // @ts-ignore
         window.ipcRenderer.off('products-updated', syncHandler);
+        // @ts-ignore
+        window.ipcRenderer.off('update-available', onUpdateAvailable);
+        // @ts-ignore
+        window.ipcRenderer.off('update-download-progress', onUpdateProgress);
+        // @ts-ignore
+        window.ipcRenderer.off('update-downloaded', onUpdateDownloaded);
       }
     }
   }, []);
@@ -1101,6 +1150,85 @@ function App() {
         )}
       </main>
       </div>
+
+      {/* ── GLOBAL AUTO-UPDATE FLOATING NOTIFICATION BUBBLE ── */}
+      {updateBubble.status === 'downloading' && (
+        <div className="fixed top-12 right-6 z-[9999] flex items-center gap-3 bg-slate-900/95 text-white px-4 py-2.5 rounded-2xl shadow-2xl border border-emerald-500/40 backdrop-blur-md">
+          <div className="w-5 h-5 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin shrink-0" />
+          <div className="flex flex-col min-w-[200px]">
+            <div className="flex items-center justify-between text-xs font-bold text-emerald-400">
+              <span className="flex items-center gap-1.5">
+                <span>Downloading Update</span>
+                {updateBubble.version && (
+                  <span className="text-[10px] bg-emerald-950/80 text-emerald-300 px-1.5 py-0.5 rounded font-mono border border-emerald-800/40">
+                    v{updateBubble.version}
+                  </span>
+                )}
+              </span>
+              <span className="text-xs font-black text-white">{updateBubble.percent}%</span>
+            </div>
+            <div className="w-full bg-slate-800 rounded-full h-1.5 mt-1.5 overflow-hidden">
+              <div
+                className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-300"
+                style={{ width: `${updateBubble.percent}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {updateBubble.status === 'ready' && !updateBubble.dismissed && (
+        <div className="fixed top-12 right-6 z-[9999] max-w-sm bg-slate-900/95 text-white p-4 rounded-2xl shadow-2xl border border-emerald-500/50 backdrop-blur-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 border border-emerald-500/30">
+                <Sparkles size={17} />
+              </div>
+              <div>
+                <h4 className="text-xs font-black tracking-wide text-white uppercase">System Update Ready</h4>
+                <p className="text-[11px] text-emerald-200/80 font-medium mt-0.5">
+                  Version {updateBubble.version || 'new'} is downloaded and ready to apply.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setUpdateBubble(prev => ({ ...prev, dismissed: true }))}
+              className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer"
+              title="Dismiss (will update automatically when you exit)"
+            >
+              <X size={15} />
+            </button>
+          </div>
+          <div className="mt-3.5 flex items-center gap-2">
+            <button
+              onClick={async () => {
+                // @ts-ignore
+                await window.db?.installUpdateNow?.();
+              }}
+              className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs rounded-xl shadow-lg shadow-emerald-500/30 transition transform active:scale-95 cursor-pointer"
+            >
+              <RotateCcw size={13} />
+              <span>Apply & Restart Now</span>
+            </button>
+            <button
+              onClick={() => setUpdateBubble(prev => ({ ...prev, dismissed: true }))}
+              className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs rounded-xl transition cursor-pointer"
+            >
+              Later
+            </button>
+          </div>
+        </div>
+      )}
+
+      {updateBubble.status === 'ready' && updateBubble.dismissed && (
+        <button
+          onClick={() => setUpdateBubble(prev => ({ ...prev, dismissed: false }))}
+          className="fixed top-12 right-6 z-[9999] flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-1.5 rounded-full shadow-lg border border-emerald-400/50 text-xs font-bold transition transform hover:scale-105 cursor-pointer animate-pulse"
+        >
+          <Sparkles size={14} className="text-emerald-200" />
+          <span>Update Ready</span>
+        </button>
+      )}
     </div>
   )
 }
