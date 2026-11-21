@@ -3158,7 +3158,7 @@ export async function checkAndSyncCatalogLive(db: Database.Database) {
     if (!isOnline) return;
 
     const pool = getRemotePool();
-    // Fast lightweight check across products, categories, brands, GRN, POs and catalog settings
+    // Fast lightweight check across products, categories, brands, GRN, POs, deleted records, and catalog settings
     const [rows]: any = await pool.query(`
       SELECT GREATEST(
         COALESCE((SELECT MAX(updated_at) FROM novafreshmart_products WHERE is_active = 1), '1970-01-01'),
@@ -3166,6 +3166,7 @@ export async function checkAndSyncCatalogLive(db: Database.Database) {
         COALESCE((SELECT MAX(updated_at) FROM novafreshmart_brands), '1970-01-01'),
         COALESCE((SELECT MAX(received_at) FROM novafreshmart_grn), '1970-01-01'),
         COALESCE((SELECT MAX(updated_at) FROM novafreshmart_purchase_orders), '1970-01-01'),
+        COALESCE((SELECT MAX(deleted_at) FROM novafreshmart_deleted_records), '1970-01-01'),
         COALESCE((SELECT value_text FROM novafreshmart_settings WHERE key_name = 'catalog_last_updated' LIMIT 1), '1970-01-01')
       ) as latest_cat_ts
     `);

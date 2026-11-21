@@ -1870,7 +1870,125 @@ ipcMain.handle('get-categories', async () => {
 
 
 
-  ipcMain.handle('get-products-advanced', () => {
+  ipcMain.handle('get-products-advanced', async () => {
+    try {
+      const isOnline = await checkRemoteConnection(3000);
+      if (isOnline) {
+        const pool = getRemotePool();
+        const [remoteProds]: any = await pool.query(`
+          SELECT p.*, COALESCE(p.category, c.name, 'General') as category_name
+          FROM novafreshmart_products p
+          LEFT JOIN novafreshmart_categories c ON c.id = p.category_id
+          WHERE p.is_active = 1
+          ORDER BY p.name ASC
+        `);
+
+        if (Array.isArray(remoteProds)) {
+          const activeIds = new Set(remoteProds.map((rp: any) => Number(rp.id)).filter(id => !isNaN(id) && id > 0));
+
+          // Asynchronously purge deleted products from local SQLite cache and sync active items
+          setTimeout(() => {
+            try {
+              db.transaction(() => {
+                // 1. Purge any products deleted from cloud
+                const localProds = db.prepare('SELECT id FROM products').all() as any[];
+                for (const lp of localProds) {
+                  if (!activeIds.has(Number(lp.id))) {
+                    db.prepare('DELETE FROM products WHERE id = ?').run(lp.id);
+                    db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(lp.id);
+                    db.prepare('DELETE FROM product_batches WHERE product_id = ?').run(lp.id);
+                  }
+                }
+
+                // 2. Insert or update active products
+                const insOrUpdate = db.prepare(`
+                  INSERT INTO products (id, name, price, wholesale_price, cost_price, barcode, branch_id, unit, stock, category_id, is_scale_item, plu, allow_price_override, expiry_date, synced)
+                  VALUES (@id, @name, @price, @wholesale_price, @cost_price, @barcode, @branch_id, @unit, @stock, @category_id, @is_scale_item, @plu, @allow_price_override, @expiry_date, 1)
+                  ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    price = excluded.price,
+                    wholesale_price = excluded.wholesale_price,
+                    cost_price = excluded.cost_price,
+                    barcode = excluded.barcode,
+                    branch_id = excluded.branch_id,
+                    unit = excluded.unit,
+                    stock = excluded.stock,
+                    category_id = excluded.category_id,
+                    is_scale_item = excluded.is_scale_item,
+                    plu = excluded.plu,
+                    allow_price_override = excluded.allow_price_override,
+                    expiry_date = excluded.expiry_date,
+                    synced = 1
+                `);
+                for (const rp of remoteProds) {
+                  const numId = Number(rp.id);
+                  if (!isNaN(numId) && numId > 0) {
+                    insOrUpdate.run({
+                      id: numId,
+                      name: rp.name,
+                      price: Number(rp.price || 0),
+                      wholesale_price: Number(rp.wholesale_price || 0),
+                      cost_price: Number(rp.cost_price || 0),
+                      barcode: rp.barcode || '',
+                      branch_id: rp.branch_id || 'ALL',
+                      unit: rp.unit || 'pc',
+                      stock: Number(rp.stock || 0),
+                      category_id: Number(rp.category_id) || 1,
+                      is_scale_item: rp.is_scale_item ? 1 : 0,
+                      plu: rp.plu || null,
+                      allow_price_override: rp.allow_price_override !== 0 ? 1 : 0,
+                      expiry_date: rp.expiry_date || null
+                    });
+                  }
+                }
+              })();
+            } catch (_) {}
+          }, 10);
+
+          let variants: any[] = [];
+          try { variants = db.prepare('SELECT * FROM product_variants').all() as any[]; } catch (_) {}
+          let batches: any[] = [];
+          try { batches = db.prepare('SELECT * FROM product_batches').all() as any[]; } catch (_) {}
+
+          const variantMap = new Map<number, any[]>()
+          for (const v of variants as any[]) {
+            const arr = variantMap.get(v.product_id) || []
+            arr.push(v)
+            variantMap.set(v.product_id, arr)
+          }
+
+          const batchMap = new Map<number, any[]>()
+          for (const b of batches as any[]) {
+            const arr = batchMap.get(b.product_id) || []
+            arr.push(b)
+            batchMap.set(b.product_id, arr)
+          }
+
+          return remoteProds.map((rp: any) => ({
+            id: Number(rp.id) || rp.id,
+            name: rp.name,
+            price: Number(rp.price || 0),
+            wholesale_price: Number(rp.wholesale_price || 0),
+            cost_price: Number(rp.cost_price || 0),
+            barcode: rp.barcode || '',
+            branch_id: rp.branch_id || 'ALL',
+            unit: rp.unit || 'pc',
+            stock: Number(rp.stock || 0),
+            category_id: Number(rp.category_id) || 1,
+            category_name: rp.category_name || 'General',
+            is_scale_item: rp.is_scale_item ? 1 : 0,
+            plu: rp.plu || null,
+            allow_price_override: rp.allow_price_override !== 0 ? 1 : 0,
+            expiry_date: rp.expiry_date || null,
+            variants: variantMap.get(Number(rp.id)) || [],
+            batches: batchMap.get(Number(rp.id)) || []
+          }));
+        }
+      }
+    } catch (err: any) {
+      console.warn('[get-products-advanced] Remote fallback to local:', err.message);
+    }
+
     try {
       const products = db.prepare('SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.id ASC').all()
       let variants: any[] = [];
@@ -2069,7 +2187,19 @@ ipcMain.handle('get-products', async () => {
                 expiry_date = excluded.expiry_date,
                 synced = 1
             `);
+            const activeIds = new Set(remoteProds.map((rp: any) => Number(rp.id)).filter(id => !isNaN(id) && id > 0));
             db.transaction(() => {
+              // 1. Purge deleted/inactive products from local cache
+              const localProds = db.prepare('SELECT id FROM products').all() as any[];
+              for (const lp of localProds) {
+                if (!activeIds.has(Number(lp.id))) {
+                  db.prepare('DELETE FROM products WHERE id = ?').run(lp.id);
+                  db.prepare('DELETE FROM product_variants WHERE product_id = ?').run(lp.id);
+                  db.prepare('DELETE FROM product_batches WHERE product_id = ?').run(lp.id);
+                }
+              }
+
+              // 2. Insert or update active products
               for (const rp of remoteProds) {
                 const numId = Number(rp.id);
                 if (!isNaN(numId) && numId > 0) {

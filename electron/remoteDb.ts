@@ -6,16 +6,25 @@ export const REMOTE_DB_CONFIG = {
   user: 'sql23659_providerid9640',
   password: 'yv4R1(2r0T@jAcM!6',
   database: 'sql23659_providerid9640',
-  connectTimeout: 5000,
+  connectTimeout: 10000,
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
+  connectionLimit: 25,
+  queueLimit: 0,
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000
 };
 
 let pool: mysql.Pool | null = null;
 let isConnected = false;
 let lastError: string | null = null;
 let lastCheckTime = 0;
+let pendingCheckPromise: Promise<boolean> | null = null;
+
+export function markRemoteConnected() {
+  isConnected = true;
+  lastCheckTime = Date.now();
+  lastError = null;
+}
 
 export function getRemotePool(): mysql.Pool {
   if (!pool) {
@@ -24,39 +33,50 @@ export function getRemotePool(): mysql.Pool {
   return pool;
 }
 
-export async function checkRemoteConnection(timeoutMs = 4500): Promise<boolean> {
+export async function checkRemoteConnection(timeoutMs = 6000): Promise<boolean> {
   const now = Date.now();
-  // If we connected successfully less than 5 seconds ago, reuse status to avoid connection pool contention
-  if (isConnected && (now - lastCheckTime < 5000)) {
+  // Reuse successful connection status for 10 seconds to avoid connection pool contention
+  if (isConnected && (now - lastCheckTime < 10000)) {
     return true;
   }
 
-  let timer: any;
-  const timeoutPromise = new Promise<boolean>((resolve) => {
-    timer = setTimeout(() => resolve(false), timeoutMs);
-  });
+  // Deduplicate concurrent check promises
+  if (pendingCheckPromise) {
+    return pendingCheckPromise;
+  }
 
-  const pingPromise = (async () => {
+  pendingCheckPromise = (async () => {
+    let timer: any;
+    const timeoutPromise = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+
+    const pingPromise = (async () => {
+      try {
+        const currentPool = getRemotePool();
+        await currentPool.query('SELECT 1');
+        isConnected = true;
+        lastCheckTime = Date.now();
+        lastError = null;
+        return true;
+      } catch (err: any) {
+        isConnected = false;
+        lastError = err.message || 'Connection failed';
+        return false;
+      }
+    })();
+
     try {
-      const currentPool = getRemotePool();
-      const conn = await currentPool.getConnection();
-      await conn.ping();
-      conn.release();
-      isConnected = true;
-      lastCheckTime = Date.now();
-      lastError = null;
-      return true;
-    } catch (err: any) {
-      isConnected = false;
-      lastError = err.message || 'Connection failed';
-      return false;
+      const result = await Promise.race([pingPromise, timeoutPromise]);
+      clearTimeout(timer);
+      if (!result) isConnected = false;
+      return Boolean(result);
+    } finally {
+      pendingCheckPromise = null;
     }
   })();
 
-  const result = await Promise.race([pingPromise, timeoutPromise]);
-  clearTimeout(timer);
-  if (!result) isConnected = false;
-  return Boolean(result);
+  return pendingCheckPromise;
 }
 
 export function getRemoteStatus() {
