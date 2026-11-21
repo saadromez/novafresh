@@ -101,6 +101,7 @@ contextBridge.exposeInMainWorld('db', {
   setDeviceMode: (mode: string) => ipcRenderer.invoke('set-device-mode', mode),
   getServerStats: () => ipcRenderer.invoke('get-server-stats'),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
-  installUpdateNow: () => ipcRenderer.invoke('install-update-now')
+  installUpdateNow: () => ipcRenderer.invoke('install-update-now'),
+  auditShiftActualCash: (data: any) => ipcRenderer.invoke('audit-shift-actual-cash', data)
 })
 

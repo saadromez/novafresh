@@ -3,7 +3,7 @@ import {
   Building2, Monitor, RefreshCw, Plus, CheckCircle2, AlertCircle, 
   Clock, User, DollarSign, ArrowUpRight, TrendingUp, ShieldCheck, 
   MapPin, Phone, Laptop, Wifi, WifiOff, Activity, Layers, Store, Trash2, Edit3,
-  FileText, Search, Eye, X, ShoppingBag, CreditCard, Check, ArrowRight, ArrowLeftRight, LogOut, Calendar, Printer
+  FileText, Search, Eye, X, ShoppingBag, CreditCard, Check, ArrowRight, ArrowLeftRight, LogOut, Calendar, Printer, Coins
 } from 'lucide-react';
 import { formatSriLankaDateTime } from '../utils/dateUtils';
 
@@ -52,6 +52,93 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
   const [modalActiveSubTab, setModalActiveSubTab] = useState<'invoices' | 'session' | 'history'>('invoices');
   const [modalInvoiceSearch, setModalInvoiceSearch] = useState('');
   const [selectedPastShiftForModal, setSelectedPastShiftForModal] = useState<any>(null);
+  const [pastShiftDetailsData, setPastShiftDetailsData] = useState<{
+    transactions: any[];
+    invoices: any[];
+    loading: boolean;
+  }>({ transactions: [], invoices: [], loading: false });
+  const [showAuditInput, setShowAuditInput] = useState(false);
+  const [auditCashValue, setAuditCashValue] = useState('');
+  const [auditNotesValue, setAuditNotesValue] = useState('');
+  const [isAuditing, setIsAuditing] = useState(false);
+
+  const handleOpenPastShiftModal = async (sess: any) => {
+    setSelectedPastShiftForModal(sess);
+    setShowAuditInput(false);
+    setAuditCashValue(Number(sess.actual_cash || sess.closing_cash || 0) > 0 ? String(sess.actual_cash || sess.closing_cash) : '');
+    setAuditNotesValue('');
+    setPastShiftDetailsData({ transactions: [], invoices: [], loading: true });
+    try {
+      // @ts-ignore
+      const res = await window.db.invoke('get-session-details', sess.id);
+      if (res) {
+        setPastShiftDetailsData({
+          transactions: res.transactions || [],
+          invoices: res.invoices || [],
+          loading: false
+        });
+        if (res.session) {
+          setSelectedPastShiftForModal((prev: any) => ({
+            ...prev,
+            ...res.session,
+            actual_cash: res.session.actual_cash != null ? Number(res.session.actual_cash) : (res.session.closing_cash != null ? Number(res.session.closing_cash) : prev?.actual_cash)
+          }));
+        }
+      } else {
+        setPastShiftDetailsData({ transactions: [], invoices: [], loading: false });
+      }
+    } catch (err) {
+      console.warn('Could not load session details:', err);
+      setPastShiftDetailsData({ transactions: [], invoices: [], loading: false });
+    }
+  };
+
+  const handleSaveAudit = async () => {
+    if (!selectedPastShiftForModal) return;
+    const num = parseFloat(auditCashValue);
+    if (isNaN(num) || num < 0) {
+      alert('Please enter a valid actual cash amount (0 or greater).');
+      return;
+    }
+    setIsAuditing(true);
+    try {
+      // @ts-ignore
+      const res = await window.db.invoke('audit-shift-actual-cash', {
+        sessionId: selectedPastShiftForModal.id,
+        shiftId: selectedPastShiftForModal.id,
+        actualCash: num,
+        notes: auditNotesValue.trim(),
+        auditedBy: currentUser?.username || 'Admin'
+      });
+      if (res && res.success) {
+        setSelectedPastShiftForModal((prev: any) => ({
+          ...prev,
+          actual_cash: res.actual_cash,
+          closing_cash: res.actual_cash,
+          expected_cash: res.expected_cash,
+          discrepancy: res.discrepancy,
+          is_audited: true,
+          notes: res.notes
+        }));
+        if (terminalDetails?.latestSessions) {
+          setTerminalDetails((prev: any) => ({
+            ...prev,
+            latestSessions: (prev.latestSessions || []).map((s: any) => 
+              s.id === selectedPastShiftForModal.id 
+                ? { ...s, actual_cash: res.actual_cash, closing_cash: res.actual_cash, expected_cash: res.expected_cash, discrepancy: res.discrepancy, is_uncounted: false, is_audited: true } 
+                : s
+            )
+          }));
+        }
+        setShowAuditInput(false);
+        alert('✓ Shift audit saved successfully! Actual count and till discrepancy have been updated.');
+      }
+    } catch (err: any) {
+      alert('Failed to save audit: ' + (err.message || err));
+    } finally {
+      setIsAuditing(false);
+    }
+  };
 
   // Terminal Invoices Tab State
   const [selectedTerminalFilterForInvoices, setSelectedTerminalFilterForInvoices] = useState<string>('ALL');
@@ -1563,13 +1650,14 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                       ) : (
                         terminalDetails.latestSessions.map((sess: any) => {
                           const isClosed = sess.status === 'CLOSED' || sess.closed_at;
-                          const expected = Number(sess.expected_cash || 0) || (Number(sess.opening_cash || 0) + Number(sess.cash_sales || sess.total_sales || 0));
+                          const expected = Number(sess.expected_cash || 0) || (Number(sess.opening_cash || 0) + Number(sess.cash_sales || 0) + Number(sess.cash_in || 0) - Number(sess.cash_out || 0) - Number(sess.total_refunds || 0));
                           const actual = Number(sess.actual_cash || sess.closing_cash || 0);
-                          const disc = isClosed ? (actual - expected) : 0;
+                          const isUncounted = Boolean(sess.is_uncounted || (isClosed && actual === 0 && !sess.is_audited && !(sess.notes && sess.notes.includes('Audit'))));
+                          const disc = isClosed && !isUncounted ? (actual - expected) : 0;
                           return (
                             <tr 
                               key={sess.id} 
-                              onClick={() => setSelectedPastShiftForModal(sess)}
+                              onClick={() => handleOpenPastShiftModal(sess)}
                               className="hover:bg-emerald-50/50 transition-colors cursor-pointer group"
                             >
                               <td className="py-2.5 px-3 font-mono font-bold text-slate-900">#{sess.id}</td>
@@ -1579,12 +1667,18 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                               <td className="py-2.5 px-3 text-right font-mono font-black text-slate-900">Rs. {Number(sess.total_sales || 0).toFixed(2)}</td>
                               <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-700">Rs. {expected.toFixed(2)}</td>
                               <td className="py-2.5 px-3 text-right font-mono font-semibold">
-                                {isClosed ? `Rs. ${actual.toFixed(2)}` : <span className="text-amber-600 font-bold text-[10px]">In Progress</span>}
+                                {!isClosed ? (
+                                  <span className="text-amber-600 font-bold text-[10px]">In Progress</span>
+                                ) : isUncounted ? (
+                                  <span className="text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded text-[10px] font-bold border border-amber-200">Uncounted</span>
+                                ) : (
+                                  `Rs. ${actual.toFixed(2)}`
+                                )}
                               </td>
                               <td className={`py-2.5 px-3 text-right font-mono font-black ${
-                                !isClosed ? 'text-gray-400' : disc === 0 ? 'text-gray-400' : disc > 0 ? 'text-emerald-700' : 'text-rose-600'
+                                !isClosed || isUncounted ? 'text-gray-400' : Math.abs(disc) < 0.01 ? 'text-emerald-700' : disc > 0 ? 'text-amber-700' : 'text-rose-600'
                               }`}>
-                                {!isClosed ? '—' : disc > 0 ? `+Rs. ${disc.toFixed(2)}` : disc < 0 ? `-Rs. ${Math.abs(disc).toFixed(2)}` : 'Rs. 0.00'}
+                                {!isClosed ? '—' : isUncounted ? <span className="text-gray-400 font-normal text-xs">Pending Count</span> : Math.abs(disc) < 0.01 ? 'Rs. 0.00' : disc > 0 ? `+Rs. ${disc.toFixed(2)}` : `-Rs. ${Math.abs(disc).toFixed(2)}`}
                               </td>
                               <td className="py-2.5 px-3 text-center">
                                 <span className={`px-2 py-0.5 rounded text-[9px] font-bold border ${
@@ -1595,7 +1689,7 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                               </td>
                               <td className="py-2.5 px-3 text-center" onClick={e => e.stopPropagation()}>
                                 <button
-                                  onClick={() => setSelectedPastShiftForModal(sess)}
+                                  onClick={() => handleOpenPastShiftModal(sess)}
                                   className="px-2.5 py-1 text-xs font-bold text-emerald-700 bg-emerald-50 group-hover:bg-emerald-600 group-hover:text-white rounded-lg flex items-center gap-1 mx-auto transition-colors cursor-pointer"
                                   title="Inspect Shift Details"
                                 >
@@ -1684,41 +1778,70 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
       {/* ── MODAL: PAST SHIFT DETAILS INSPECTOR ── */}
       {selectedPastShiftForModal && (() => {
         const sess = selectedPastShiftForModal;
-        const isClosed = sess.status === 'CLOSED' || sess.closed_at;
-        const expected = Number(sess.expected_cash || 0) || (Number(sess.opening_cash || 0) + Number(sess.cash_sales || sess.total_sales || 0));
-        const actual = Number(sess.actual_cash || sess.closing_cash || 0);
-        const disc = isClosed ? (actual - expected) : 0;
-        const isBalanced = isClosed && Math.abs(disc) < 0.01;
-        const isShortage = isClosed && disc < -0.01;
+        const isClosed = sess.status === 'CLOSED' || sess.status === 'closed' || Boolean(sess.closed_at);
+        
+        // Sum Cash In and Cash Out from loaded transactions if available, otherwise from sess fields
+        const txs = pastShiftDetailsData.transactions || [];
+        const txCashIn = txs.filter((t: any) => (t.type || '').toUpperCase() === 'CASH_IN').reduce((sum: number, t: any) => sum + Number(t.amount || 0), 0);
+        const txCashOut = txs.filter((t: any) => (t.type || '').toUpperCase() === 'CASH_OUT' || (t.type || '').toUpperCase() === 'EXPENSE').reduce((sum: number, t: any) => sum + Number(t.amount || 0), 0);
+
+        const openCash = Number(sess.opening_cash || 0);
+        const cashSales = Number(sess.cash_sales || 0);
+        const cardSales = Number(sess.card_sales || 0);
+        const bankSales = Number(sess.other_sales || 0);
+        const grossSales = Number(sess.total_sales || (cashSales + cardSales + bankSales) || 0);
+        const cashIn = txs.length > 0 ? txCashIn : Number(sess.cash_in || 0);
+        const cashOut = txs.length > 0 ? txCashOut : Number(sess.cash_out || 0);
+        const totalRefunds = Number(sess.total_refunds || 0);
+
+        // Core Formula: Opening + Cash Sale + Cash In - Cash Out - Refunds = Expected Cash
+        const calculatedExpected = openCash + cashSales + cashIn - cashOut - totalRefunds;
+        const expected = Number(sess.expected_cash || 0) > 0 ? Number(sess.expected_cash) : calculatedExpected;
+
+        const actual = Number(sess.actual_cash != null ? sess.actual_cash : (sess.closing_cash || 0));
+        const isAudited = Boolean(sess.is_audited || (sess.notes && sess.notes.includes('Audit')));
+        const isUncounted = isClosed && (actual === 0 || sess.actual_cash === null || sess.actual_cash === undefined) && !isAudited;
+
+        const disc = isClosed && !isUncounted ? (actual - expected) : 0;
+        const isBalanced = isClosed && !isUncounted && Math.abs(disc) < 0.01;
+        const isShortage = isClosed && !isUncounted && disc < -0.01;
+        const isExcess = isClosed && !isUncounted && disc > 0.01;
 
         const handlePrintPastShift = () => {
-          const cashSales = Number(sess.cash_sales || 0);
-          const cardSales = Number(sess.card_sales || 0);
-          const bankSales = Number(sess.other_sales || 0);
           const w = window.open('', '_blank', 'width=700,height=900');
           if (!w) return;
-          w.document.write(`<!DOCTYPE html><html><head><title>Session Report #${sess.id}</title><style>
+          w.document.write(`<!DOCTYPE html><html><head><title>Shift Session Report #${sess.id}</title><style>
             body{font-family:monospace;font-size:12px;margin:24px;color:#111}
             h1{font-size:16px;margin:0 0 4px}h2{font-size:13px;margin:16px 0 6px;border-bottom:1px solid #ccc;padding-bottom:4px}
             .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
             .box{border:1px solid #ddd;border-radius:6px;padding:10px}
             .label{font-size:10px;color:#666;text-transform:uppercase;font-weight:bold}
             .val{font-size:15px;font-weight:900;margin-top:2px}
+            table{width:100%;border-collapse:collapse;margin-top:8px}
+            th,td{text-align:left;padding:6px;border-bottom:1px solid #eee;font-size:11px}
+            th{background:#f8f9fa}
             @media print{button{display:none}}
           </style></head><body>
-          <h1>Nova FreshMart — Session Report</h1>
+          <h1>Nova FreshMart — Shift Session Report</h1>
           <p style="color:#555;font-size:11px">Shift #${sess.id} &bull; ${sess.terminal_name||sess.terminal_id} &bull; ${sess.branch_name||sess.branch_id} &bull; Cashier: ${sess.username||'Cashier'}</p>
           <p style="color:#555;font-size:11px">Opened: ${sess.opened_at||''} &bull; Closed: ${sess.closed_at||'In Progress'}</p>
-          <h2>Financial Summary</h2>
+          <h2>Cash Flow & Till Formula</h2>
           <div class="grid">
-            <div class="box"><div class="label">Opening Float</div><div class="val">Rs. ${Number(sess.opening_cash||0).toFixed(2)}</div></div>
-            <div class="box"><div class="label">Gross Sales</div><div class="val">Rs. ${Number(sess.total_sales||0).toFixed(2)}</div></div>
+            <div class="box"><div class="label">Opening Float (+)</div><div class="val">Rs. ${openCash.toFixed(2)}</div></div>
+            <div class="box"><div class="label">Cash Sales (+)</div><div class="val">Rs. ${cashSales.toFixed(2)}</div></div>
+            <div class="box"><div class="label">Cash In / Float (+)</div><div class="val">Rs. ${cashIn.toFixed(2)}</div></div>
+            <div class="box"><div class="label">Cash Out / Expenses (-)</div><div class="val">Rs. ${cashOut.toFixed(2)}</div></div>
+            <div class="box"><div class="label">Refunds / Exchange (-)</div><div class="val">Rs. ${totalRefunds.toFixed(2)}</div></div>
+            <div class="box" style="border-color:#16a34a"><div class="label">Expected Till Cash (=)</div><div class="val" style="color:#16a34a">Rs. ${expected.toFixed(2)}</div></div>
+            <div class="box"><div class="label">Actual Counted</div><div class="val">${!isClosed ? 'In Progress' : isUncounted ? 'Uncounted (Pending Audit)' : 'Rs. ' + actual.toFixed(2)}</div></div>
+            <div class="box" style="border-color:${isUncounted?'#f59e0b':isBalanced?'#16a34a':isExcess?'#d97706':'#dc2626'}"><div class="label">Till Discrepancy</div><div class="val" style="color:${isUncounted?'#f59e0b':isBalanced?'#16a34a':isExcess?'#d97706':'#dc2626'}">${!isClosed ? '—' : isUncounted ? 'Pending Count' : isBalanced ? 'Balanced (Rs. 0.00)' : isExcess ? '+Rs. ' + disc.toFixed(2) : '-Rs. ' + Math.abs(disc).toFixed(2)}</div></div>
+          </div>
+          <h2>Payment Tender Breakdown</h2>
+          <div class="grid">
             <div class="box"><div class="label">Cash Sales</div><div class="val">Rs. ${cashSales.toFixed(2)}</div></div>
             <div class="box"><div class="label">Card Sales</div><div class="val">Rs. ${cardSales.toFixed(2)}</div></div>
             <div class="box"><div class="label">Bank/QR Sales</div><div class="val">Rs. ${bankSales.toFixed(2)}</div></div>
-            <div class="box"><div class="label">Expected Till</div><div class="val">Rs. ${expected.toFixed(2)}</div></div>
-            <div class="box"><div class="label">Closing Count</div><div class="val">${isClosed?'Rs. '+actual.toFixed(2):'In Progress'}</div></div>
-            <div class="box" style="border-color:${Math.abs(disc)<0.01?'#16a34a':disc>0?'#d97706':'#dc2626'}"><div class="label">Discrepancy</div><div class="val" style="color:${Math.abs(disc)<0.01?'#16a34a':disc>0?'#d97706':'#dc2626'}">${!isClosed?'—':Math.abs(disc)<0.01?'Balanced':disc>0?'+Rs. '+disc.toFixed(2):'-Rs. '+Math.abs(disc).toFixed(2)}</div></div>
+            <div class="box"><div class="label">Total Gross Sales</div><div class="val">Rs. ${grossSales.toFixed(2)}</div></div>
           </div>
           <br/><button onclick="window.print()" style="padding:8px 20px;background:#1e293b;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">🖨 Print / Save as PDF</button>
           </body></html>`);
@@ -1727,7 +1850,8 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
 
         return (
           <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[210] flex items-center justify-center p-4">
-            <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl text-slate-900 border border-slate-200 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl text-slate-900 border border-slate-200 space-y-4 max-h-[90vh] overflow-y-auto">
+              {/* Header */}
               <div className="flex justify-between items-center pb-3 border-b border-slate-100">
                 <div>
                   <h3 className="font-black text-base text-slate-900 flex items-center gap-2">
@@ -1752,10 +1876,17 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                   ? 'bg-gray-50 border-gray-200 text-slate-700' 
                   : 'bg-emerald-50 border-emerald-200 text-emerald-800'
               }`}>
-                <span className="text-xs font-bold uppercase tracking-wider">
-                  Session Status: <strong>{isClosed ? 'SHIFT CLOSED / ENDED' : 'LIVE ACTIVE SHIFT'}</strong>
-                </span>
-                <span className={`px-2.5 py-1 rounded-full text-xs font-black ${
+                <div>
+                  <span className="text-xs font-bold uppercase tracking-wider block">
+                    Session Status: <strong>{isClosed ? 'SHIFT CLOSED / ENDED' : 'LIVE ACTIVE SHIFT'}</strong>
+                  </span>
+                  {isUncounted && (
+                    <span className="text-[11px] text-amber-700 font-semibold block mt-0.5">
+                      ⚠ Shift auto-closed; physical cash was not counted at handover.
+                    </span>
+                  )}
+                </div>
+                <span className={`px-2.5 py-1 rounded-full text-xs font-black shrink-0 ${
                   isClosed ? 'bg-gray-200 text-slate-800' : 'bg-emerald-600 text-white'
                 }`}>
                   {isClosed ? 'CLOSED' : 'ACTIVE'}
@@ -1774,44 +1905,212 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                 </div>
               </div>
 
-              {/* Financial Key Metrics Grid */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
-                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
-                  <span className="text-[10px] font-bold text-gray-400 uppercase block">Opening Float</span>
-                  <span className="font-mono font-black text-slate-900 text-sm mt-0.5 block">Rs. {Number(sess.opening_cash || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                </div>
-                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
-                  <span className="text-[10px] font-bold text-gray-400 uppercase block">Gross Sales</span>
-                  <span className="font-mono font-black text-slate-900 text-sm mt-0.5 block">Rs. {Number(sess.total_sales || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                </div>
-                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
-                  <span className="text-[10px] font-bold text-gray-400 uppercase block">Expected Cash</span>
-                  <span className="font-mono font-black text-emerald-700 text-sm mt-0.5 block">Rs. {expected.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                </div>
-                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
-                  <span className="text-[10px] font-bold text-gray-400 uppercase block">Actual Counted</span>
-                  <span className="font-mono font-black text-slate-900 text-sm mt-0.5 block">
-                    {isClosed ? `Rs. ${actual.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : 'In Progress'}
+              {/* Cash Flow & Till Math Formula Card */}
+              <div className="bg-slate-900 text-white p-4 rounded-2xl shadow-sm space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                    <Coins size={13} />
+                    Cash Flow & Till Math Breakdown
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-400">
+                    Open + CashSale + CashIn - CashOut = Expected
                   </span>
                 </div>
-                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 col-span-2">
-                  <span className="text-[10px] font-bold text-gray-400 uppercase block">Till Variance / Audit</span>
-                  <span className={`font-mono font-black text-sm mt-0.5 block ${
-                    !isClosed ? 'text-gray-400' : isBalanced ? 'text-emerald-700' : isShortage ? 'text-rose-600' : 'text-amber-700'
-                  }`}>
-                    {!isClosed ? 'In Progress' : isBalanced ? 'Balanced (Rs. 0.00)' : disc > 0 ? `Excess: +Rs. ${disc.toFixed(2)}` : `Shortage: -Rs. ${Math.abs(disc).toFixed(2)}`}
-                  </span>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                  <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Opening Float (+)</span>
+                    <span className="font-mono font-bold text-slate-100 text-sm mt-0.5 block">Rs. {openCash.toFixed(2)}</span>
+                  </div>
+                  <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
+                    <span className="text-[10px] text-emerald-400 uppercase font-bold block">Cash Sales (+)</span>
+                    <span className="font-mono font-bold text-emerald-400 text-sm mt-0.5 block">+Rs. {cashSales.toFixed(2)}</span>
+                  </div>
+                  <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
+                    <span className="text-[10px] text-teal-400 uppercase font-bold block">Cash In / Float (+)</span>
+                    <span className="font-mono font-bold text-teal-400 text-sm mt-0.5 block">+Rs. {cashIn.toFixed(2)}</span>
+                  </div>
+                  <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
+                    <span className="text-[10px] text-rose-400 uppercase font-bold block">Cash Out / Drops (-)</span>
+                    <span className="font-mono font-bold text-rose-400 text-sm mt-0.5 block">-Rs. {cashOut.toFixed(2)}</span>
+                  </div>
+                  <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
+                    <span className="text-[10px] text-amber-400 uppercase font-bold block">Refunds / Returns (-)</span>
+                    <span className="font-mono font-bold text-amber-400 text-sm mt-0.5 block">-Rs. {totalRefunds.toFixed(2)}</span>
+                  </div>
+                  <div className="bg-emerald-950/70 p-2.5 rounded-xl border border-emerald-500/50">
+                    <span className="text-[10px] text-emerald-300 uppercase font-black block">Expected Till (=)</span>
+                    <span className="font-mono font-black text-emerald-300 text-sm mt-0.5 block">Rs. {expected.toFixed(2)}</span>
+                  </div>
                 </div>
+              </div>
+
+              {/* Actual Counted & Till Variance */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase">Actual Cash Counted</span>
+                    {isClosed && (
+                      <button
+                        onClick={() => setShowAuditInput(!showAuditInput)}
+                        className="text-[11px] font-bold text-emerald-700 hover:text-emerald-800 underline cursor-pointer"
+                      >
+                        {isUncounted ? '➕ Enter Count' : '✏ Edit Count'}
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-1">
+                    {!isClosed ? (
+                      <span className="text-amber-600 font-bold text-sm">Shift In Progress</span>
+                    ) : isUncounted ? (
+                      <div>
+                        <span className="inline-block px-2.5 py-1 rounded-lg bg-amber-100 text-amber-800 text-xs font-black">
+                          Uncounted (Auto-Closed)
+                        </span>
+                        <p className="text-[10px] text-gray-500 mt-1">Cashier left without entering drawer count.</p>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono font-black text-slate-900 text-base">
+                          Rs. {actual.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                        </span>
+                        {isAudited && (
+                          <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                            Audited
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                  <span className="text-[10px] font-bold text-gray-500 uppercase block">Till Variance / Audit</span>
+                  <div className="mt-1">
+                    {!isClosed ? (
+                      <span className="text-gray-400 font-bold text-sm">—</span>
+                    ) : isUncounted ? (
+                      <div>
+                        <span className="inline-block px-2.5 py-1 rounded-lg bg-slate-100 text-slate-600 text-xs font-black">
+                          Pending Count Audit
+                        </span>
+                        <p className="text-[10px] text-gray-400 mt-1">No shortage recorded until audited.</p>
+                      </div>
+                    ) : (
+                      <div>
+                        <span className={`font-mono font-black text-sm block ${
+                          isBalanced ? 'text-emerald-700' : isExcess ? 'text-amber-700' : 'text-rose-600'
+                        }`}>
+                          {isBalanced ? 'Balanced (Rs. 0.00)' : isExcess ? `Excess: +Rs. ${disc.toFixed(2)}` : `Shortage: -Rs. ${Math.abs(disc).toFixed(2)}`}
+                        </span>
+                        {sess.notes && <p className="text-[10px] text-gray-400 mt-0.5 truncate">{sess.notes}</p>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Inline Audit Form */}
+              {showAuditInput && (
+                <div className="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-black text-emerald-900 uppercase tracking-wide">Audit & Record Shift Cash Count</span>
+                    <button onClick={() => setShowAuditInput(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer"><X size={14} /></button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="text-[10px] font-bold text-gray-600 uppercase block mb-1">Counted Physical Cash (Rs.) *</label>
+                      <input
+                        type="number"
+                        step="any"
+                        value={auditCashValue}
+                        onChange={(e) => setAuditCashValue(e.target.value)}
+                        placeholder={`Expected: ${expected.toFixed(2)}`}
+                        className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl font-mono font-bold text-sm text-slate-900 focus:outline-none focus:border-emerald-500"
+                        autoFocus
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-gray-600 uppercase block mb-1">Audit Notes / Reason (Optional)</label>
+                      <input
+                        type="text"
+                        value={auditNotesValue}
+                        onChange={(e) => setAuditNotesValue(e.target.value)}
+                        placeholder="e.g. Drawer verified by Admin Divya"
+                        className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button
+                      onClick={() => setShowAuditInput(false)}
+                      className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold rounded-lg cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleSaveAudit}
+                      disabled={isAuditing}
+                      className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+                    >
+                      {isAuditing ? <RefreshCw size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+                      Save Count & Recalculate Variance
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Cash In & Cash Out Records Section */}
+              <div className="bg-gray-50/80 p-3.5 rounded-2xl border border-gray-200/80 space-y-2 text-xs">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-bold text-gray-600 uppercase tracking-wider flex items-center gap-1.5">
+                    <Coins size={14} className="text-emerald-600" />
+                    Cash In & Cash Out Records ({txs.length})
+                  </span>
+                  {pastShiftDetailsData.loading && <RefreshCw size={12} className="animate-spin text-gray-400" />}
+                </div>
+                {pastShiftDetailsData.loading ? (
+                  <div className="py-3 text-center text-gray-400 text-xs">Loading cash records...</div>
+                ) : txs.length === 0 ? (
+                  <div className="py-2.5 px-3 bg-white rounded-xl border border-gray-200 text-gray-400 italic text-center">
+                    No Cash In or Cash Out recorded during this shift.
+                  </div>
+                ) : (
+                  <div className="max-h-36 overflow-y-auto space-y-1.5">
+                    {txs.map((tx: any, idx: number) => {
+                      const isTxIn = (tx.type || '').toUpperCase() === 'CASH_IN';
+                      return (
+                        <div key={tx.id || idx} className="flex justify-between items-center py-2 px-3 bg-white rounded-xl border border-gray-200 text-xs">
+                          <div className="flex items-center gap-2">
+                            <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase ${
+                              isTxIn ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                            }`}>
+                              {isTxIn ? '+ Cash In' : '- Cash Out'}
+                            </span>
+                            <span className="text-slate-700 font-medium">{tx.notes || (isTxIn ? 'Cash Drop / In' : 'Petty Cash Expense')}</span>
+                          </div>
+                          <div className="text-right">
+                            <span className={`font-mono font-bold ${isTxIn ? 'text-emerald-700' : 'text-rose-600'}`}>
+                              {isTxIn ? '+' : '-'}Rs. {Number(tx.amount || 0).toFixed(2)}
+                            </span>
+                            <span className="block text-[9px] text-gray-400 font-mono">
+                              {tx.created_at ? new Date(tx.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* Tender Breakdown */}
               <div className="bg-gray-50/80 p-3.5 rounded-2xl border border-gray-200/80 space-y-2 text-xs">
                 <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Payment Method Breakdown</p>
                 {[
-                  { label: 'Cash Sales', value: Number(sess.cash_sales || 0), color: 'text-emerald-700', bg: 'bg-emerald-50', border: 'border-emerald-200' },
-                  { label: 'Card / POS Sales', value: Number(sess.card_sales || 0), color: 'text-amber-700', bg: 'bg-amber-50', border: 'border-amber-200' },
-                  { label: 'Bank Transfer / QR / Other', value: Number(sess.other_sales || 0), color: 'text-purple-700', bg: 'bg-purple-50', border: 'border-purple-200' },
-                  { label: 'Total Gross Sales', value: Number(sess.total_sales || 0), color: 'text-slate-900', bg: 'bg-slate-100', border: 'border-slate-300' },
+                  { label: 'Cash Sales', value: cashSales, color: 'text-emerald-700', bg: 'bg-emerald-50', border: 'border-emerald-200' },
+                  { label: 'Card / POS Sales', value: cardSales, color: 'text-amber-700', bg: 'bg-amber-50', border: 'border-amber-200' },
+                  { label: 'Bank Transfer / QR / Other', value: bankSales, color: 'text-purple-700', bg: 'bg-purple-50', border: 'border-purple-200' },
+                  { label: 'Total Gross Sales', value: grossSales, color: 'text-slate-900', bg: 'bg-slate-100', border: 'border-slate-300' },
                 ].map(row => (
                   <div key={row.label} className={`flex justify-between items-center py-2 px-3 rounded-xl border ${row.bg} ${row.border} text-sm`}>
                     <span className="font-semibold text-slate-600">{row.label}</span>
@@ -2216,17 +2515,22 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                   cashOut = txs.reduce((acc: number, t: any) => (t.type || '').toUpperCase() !== 'CASH_IN' ? acc + Number(t.amount || 0) : acc, 0);
                 }
 
+                const isShiftClosed = (s.status || '').toLowerCase() === 'closed';
+                const isShiftAudited = Boolean(s.is_audited || (s.notes && s.notes.includes('Audit')));
+                const isShiftUncounted = isShiftClosed && actualCash === 0 && !isShiftAudited;
+                const totalRefunds = Number(s.total_refunds || 0);
+
                 const expectedCash = Number(s.expected_cash || 0) > 0 
                   ? Number(s.expected_cash) 
-                  : Math.max(0, openCash + cashSales + cashIn - cashOut);
-                const diff = (s.status || '').toLowerCase() === 'closed' ? (actualCash - expectedCash) : 0;
+                  : Math.max(0, openCash + cashSales + cashIn - cashOut - totalRefunds);
+                const diff = isShiftClosed && !isShiftUncounted ? (actualCash - expectedCash) : 0;
 
                 return (
                   <>
                     {/* Metrics Grid */}
                     <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                       <div className="bg-gray-50 p-3 rounded-2xl border border-gray-200/80 shadow-2xs">
-                        <p className="text-[10px] font-bold text-gray-400 uppercase">Opening Float</p>
+                        <p className="text-[10px] font-bold text-gray-400 uppercase">Opening Float (+)</p>
                         <p className="text-lg font-black text-slate-900 mt-1">Rs. {openCash.toFixed(2)}</p>
                       </div>
                       <div className="bg-gray-50 p-3 rounded-2xl border border-gray-200/80 shadow-2xs">
@@ -2234,7 +2538,7 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                         <p className="text-lg font-black text-slate-900 mt-1">Rs. {grossSales.toFixed(2)}</p>
                       </div>
                       <div className="bg-gray-50 p-3 rounded-2xl border border-gray-200/80 shadow-2xs">
-                        <p className="text-[10px] font-bold text-gray-400 uppercase">Cash Collected</p>
+                        <p className="text-[10px] font-bold text-gray-400 uppercase">Cash Collected (+)</p>
                         <p className="text-lg font-black text-emerald-700 mt-1">Rs. {cashSales.toFixed(2)}</p>
                       </div>
                       <div className="bg-gray-50 p-3 rounded-2xl border border-gray-200/80 shadow-2xs">
@@ -2246,25 +2550,45 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                         <p className="text-lg font-black text-purple-700 mt-1">Rs. {bankSales.toFixed(2)}</p>
                       </div>
                       <div className="bg-emerald-50/60 p-3 rounded-2xl border border-emerald-200/80 shadow-2xs">
-                        <p className="text-[10px] font-bold text-emerald-700 uppercase">Cash In (Till Add)</p>
+                        <p className="text-[10px] font-bold text-emerald-700 uppercase">Cash In / Float (+)</p>
                         <p className="text-lg font-black text-emerald-700 mt-1">+Rs. {cashIn.toFixed(2)}</p>
                       </div>
                       <div className="bg-rose-50/60 p-3 rounded-2xl border border-rose-200/80 shadow-2xs">
-                        <p className="text-[10px] font-bold text-rose-700 uppercase">Cash Out / Expenses</p>
+                        <p className="text-[10px] font-bold text-rose-700 uppercase">Cash Out / Drops (-)</p>
                         <p className="text-lg font-black text-rose-700 mt-1">-Rs. {cashOut.toFixed(2)}</p>
                       </div>
                       <div className="bg-gray-50 p-3 rounded-2xl border border-gray-200/80 shadow-2xs">
-                        <p className="text-[10px] font-bold text-gray-400 uppercase">Expected Till</p>
+                        <p className="text-[10px] font-bold text-gray-400 uppercase">Expected Till (=)</p>
                         <p className="text-lg font-black text-emerald-700 mt-1">Rs. {expectedCash.toFixed(2)}</p>
                       </div>
                       <div className="bg-gray-50 p-3 rounded-2xl border border-gray-200/80 shadow-2xs">
-                        <p className="text-[10px] font-bold text-gray-400 uppercase">Closing Count</p>
+                        <div className="flex items-center justify-between">
+                          <p className="text-[10px] font-bold text-gray-400 uppercase">Closing Count</p>
+                          {isShiftClosed && (
+                            <button
+                              onClick={() => {
+                                setAuditCashValue(actualCash > 0 ? String(actualCash) : '');
+                                setAuditNotesValue('');
+                                setShowAuditInput(!showAuditInput);
+                              }}
+                              className="text-[10px] font-bold text-emerald-700 hover:text-emerald-800 underline cursor-pointer"
+                            >
+                              {isShiftUncounted ? '➕ Audit' : '✏ Edit'}
+                            </button>
+                          )}
+                        </div>
                         <p className="text-lg font-black text-slate-900 mt-0.5">
-                          {(s.status || '').toLowerCase() === 'closed' ? `Rs. ${actualCash.toFixed(2)}` : 'In Progress'}
+                          {!isShiftClosed ? 'In Progress' : isShiftUncounted ? (
+                            <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-lg font-black">Uncounted</span>
+                          ) : (
+                            `Rs. ${actualCash.toFixed(2)}`
+                          )}
                         </p>
                       </div>
                       <div className={`p-3 rounded-2xl border shadow-2xs ${
-                        Math.abs(diff) < 0.01 
+                        !isShiftClosed || isShiftUncounted
+                          ? 'bg-slate-50 border-slate-200 text-slate-600'
+                          : Math.abs(diff) < 0.01 
                           ? 'bg-emerald-50 border-emerald-200 text-emerald-700' 
                           : diff > 0 
                           ? 'bg-amber-50 border-amber-200 text-amber-700' 
@@ -2272,10 +2596,105 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                       }`}>
                         <p className="text-[10px] font-bold uppercase">Cash Discrepancy</p>
                         <p className="text-lg font-black mt-0.5">
-                          {(s.status || '').toLowerCase() !== 'closed' ? '—' : diff === 0 ? 'Balanced' : (diff > 0 ? `+Rs. ${diff.toFixed(2)}` : `-Rs. ${Math.abs(diff).toFixed(2)}`)}
+                          {!isShiftClosed ? '—' : isShiftUncounted ? (
+                            <span className="text-xs font-bold text-gray-500">Pending Count Audit</span>
+                          ) : Math.abs(diff) < 0.01 ? (
+                            'Balanced'
+                          ) : diff > 0 ? (
+                            `+Rs. ${diff.toFixed(2)}`
+                          ) : (
+                            `-Rs. ${Math.abs(diff).toFixed(2)}`
+                          )}
                         </p>
                       </div>
                     </div>
+
+                    {/* Inline Audit Form */}
+                    {showAuditInput && (
+                      <div className="p-4 bg-emerald-50/80 rounded-2xl border border-emerald-200 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-black text-emerald-900 uppercase tracking-wide">Audit & Record Shift Cash Count</span>
+                          <button onClick={() => setShowAuditInput(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer"><X size={14} /></button>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          <div>
+                            <label className="text-[10px] font-bold text-gray-600 uppercase block mb-1">Counted Physical Cash (Rs.) *</label>
+                            <input
+                              type="number"
+                              step="any"
+                              value={auditCashValue}
+                              onChange={(e) => setAuditCashValue(e.target.value)}
+                              placeholder={`Expected: ${expectedCash.toFixed(2)}`}
+                              className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl font-mono font-bold text-sm text-slate-900 focus:outline-none focus:border-emerald-500"
+                              autoFocus
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-gray-600 uppercase block mb-1">Audit Notes / Verified By</label>
+                            <input
+                              type="text"
+                              value={auditNotesValue}
+                              onChange={(e) => setAuditNotesValue(e.target.value)}
+                              placeholder="e.g. Drawer verified by Admin Divya"
+                              className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:border-emerald-500"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex justify-end gap-2 pt-1">
+                          <button
+                            onClick={() => setShowAuditInput(false)}
+                            className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold rounded-lg cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={async () => {
+                              const num = parseFloat(auditCashValue);
+                              if (isNaN(num) || num < 0) {
+                                alert('Please enter a valid actual cash amount (0 or greater).');
+                                return;
+                              }
+                              setIsAuditing(true);
+                              try {
+                                // @ts-ignore
+                                const res = await window.db.invoke('audit-shift-actual-cash', {
+                                  sessionId: s.id,
+                                  shiftId: s.id,
+                                  actualCash: num,
+                                  notes: auditNotesValue.trim(),
+                                  auditedBy: currentUser?.username || 'Admin'
+                                });
+                                if (res && res.success) {
+                                  setShiftDetailData((prev: any) => ({
+                                    ...prev,
+                                    session: {
+                                      ...(prev?.session || s),
+                                      actual_cash: res.actual_cash,
+                                      closing_cash: res.actual_cash,
+                                      expected_cash: res.expected_cash,
+                                      discrepancy: res.discrepancy,
+                                      is_audited: true,
+                                      notes: res.notes
+                                    }
+                                  }));
+                                  setShowAuditInput(false);
+                                  alert('✓ Shift audit saved successfully! Actual count and till discrepancy updated.');
+                                }
+                              } catch (err: any) {
+                                alert('Failed to save audit: ' + (err.message || err));
+                              } finally {
+                                setIsAuditing(false);
+                              }
+                            }}
+                            disabled={isAuditing}
+                            className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+                          >
+                            {isAuditing ? <RefreshCw size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+                            Save Count & Recalculate Variance
+                          </button>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Cash Movements (Cash In / Out / Expenses) */}
                     <div className="bg-white rounded-2xl border border-gray-200/90 overflow-hidden shadow-2xs">

@@ -2752,8 +2752,9 @@ ipcMain.handle('get-session-details', async (_, sessionId) => {
     transactions = db.prepare(`
       SELECT * FROM session_transactions 
       WHERE session_id = ? OR shift_id = ? OR (shift_id IS NOT NULL AND session_id = ?)
+         OR (terminal_id = ? AND created_at >= ? AND (created_at <= ? OR ? IS NULL))
       ORDER BY created_at ASC, id ASC
-    `).all(session.id, shiftId, sessionId);
+    `).all(session.id, shiftId, sessionId, session.terminal_id, session.opened_at, session.closed_at, session.closed_at);
     invoices = db.prepare('SELECT * FROM invoices WHERE session_id = ? ORDER BY id ASC').all(session.id);
 
     // If no direct session_id match (e.g. from cloud pull or legacy records), look up by shift time window & terminal
@@ -2835,8 +2836,8 @@ ipcMain.handle('get-session-details', async (_, sessionId) => {
         if (session && transactions.length === 0) {
           const shiftId = session.remote_id || session.id;
           const [remoteTxs]: any = await pool.query(
-            "SELECT * FROM novafreshmart_session_transactions WHERE shift_id = ? OR shift_id LIKE ? OR session_id = ? ORDER BY created_at ASC",
-            [shiftId, `%-${sessionId}`, sessionId]
+            "SELECT * FROM novafreshmart_session_transactions WHERE shift_id = ? OR shift_id LIKE ? OR session_id = ? OR (terminal_id = ? AND created_at >= ? AND (created_at <= ? OR ? IS NULL)) ORDER BY created_at ASC",
+            [shiftId, `%-${sessionId}`, sessionId, session.terminal_id, session.opened_at, session.closed_at, session.closed_at]
           );
           if (Array.isArray(remoteTxs) && remoteTxs.length > 0) {
             transactions = remoteTxs.map((t: any) => ({
@@ -2859,6 +2860,93 @@ ipcMain.handle('get-session-details', async (_, sessionId) => {
 
   if (!session) return null;
   return { session, transactions, invoices };
+});
+
+ipcMain.handle('audit-shift-actual-cash', async (_, { sessionId, shiftId, actualCash, notes, auditedBy = 'Admin' }: any) => {
+  const actual = Number(actualCash || 0);
+  const targetId = shiftId || sessionId;
+  console.log(`[audit-shift-actual-cash] Auditing shift ${targetId} with actual cash Rs. ${actual}`);
+
+  // 1. Fetch current session data from local SQLite
+  let sess: any = db.prepare('SELECT * FROM sessions WHERE id = ? OR remote_id = ?').get(sessionId, targetId);
+
+  // If not in local SQLite, try to find in MariaDB
+  let remoteShift: any = null;
+  try {
+    const isOnline = await checkRemoteConnection(2000);
+    if (isOnline) {
+      const pool = getRemotePool();
+      const [rows]: any = await pool.query(
+        'SELECT * FROM novafreshmart_terminal_shifts WHERE id = ? OR id LIKE ? LIMIT 1',
+        [targetId, `%-${sessionId}`]
+      );
+      if (Array.isArray(rows) && rows.length > 0) {
+        remoteShift = rows[0];
+      }
+    }
+  } catch (err: any) {
+    console.warn('[audit-shift-actual-cash] Error querying remote shift:', err.message);
+  }
+
+  const openingCash = Number(sess?.opening_cash || remoteShift?.opening_cash || 0);
+  const cashSales = Number(sess?.cash_sales || remoteShift?.cash_sales || 0);
+  const cashIn = Number(sess?.cash_in || remoteShift?.cash_in || 0);
+  const cashOut = Number(sess?.cash_out || remoteShift?.cash_out || 0);
+  const totalRefunds = Number(sess?.total_refunds || remoteShift?.total_refunds || 0);
+
+  // Expected Cash = Opening Balance + Cash Sales + Cash In - Cash Out - Refunds
+  const expectedCash = openingCash + cashSales + cashIn - cashOut - totalRefunds;
+  const discrepancy = actual - expectedCash;
+  const auditNote = `Audited by ${auditedBy}${notes ? ': ' + notes : ''}`;
+
+  // 2. Update local SQLite if session exists
+  if (sess) {
+    db.prepare(`
+      UPDATE sessions SET
+        actual_cash = ?,
+        closing_cash = ?,
+        expected_cash = ?,
+        discrepancy = ?,
+        notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || ' | ' || ? END,
+        synced = 0
+      WHERE id = ?
+    `).run(actual, actual, expectedCash, discrepancy, auditNote, auditNote, sess.id);
+  }
+
+  // 3. Update remote MariaDB
+  try {
+    const isOnline = await checkRemoteConnection(2000);
+    if (isOnline) {
+      const pool = getRemotePool();
+      await pool.query(`
+        UPDATE novafreshmart_terminal_shifts SET
+          closing_cash = ?,
+          expected_cash = ?,
+          discrepancy = ?,
+          notes = CONCAT(COALESCE(notes, ''), ' | ', ?),
+          synced_at = CURRENT_TIMESTAMP
+        WHERE id = ? OR id LIKE ?
+      `, [actual, expectedCash, discrepancy, auditNote, targetId, `%-${sessionId}`]);
+
+      // Also log audit activity
+      const branchId = sess?.branch_id || remoteShift?.branch_id || 'BR-MAIN';
+      const terminalId = sess?.terminal_id || remoteShift?.terminal_id || 'TERM-01';
+      await pool.query(`
+        INSERT INTO novafreshmart_terminal_logs (branch_id, terminal_id, username, action_type, details)
+        VALUES (?, ?, ?, 'SHIFT_AUDIT', ?)
+      `, [branchId, terminalId, auditedBy, `Shift #${targetId} actual cash counted as Rs. ${actual.toFixed(2)}, variance: Rs. ${discrepancy.toFixed(2)} (${auditNote})`]);
+    }
+  } catch (err: any) {
+    console.warn('[audit-shift-actual-cash] Error updating remote shift:', err.message);
+  }
+
+  return {
+    success: true,
+    actual_cash: actual,
+    expected_cash: expectedCash,
+    discrepancy,
+    notes: auditNote
+  };
 });
 
 let lastCheckoutSignature = '';
@@ -3609,11 +3697,38 @@ ipcMain.handle('get-terminal-details', async (_, terminalId) => {
         return {
           terminal,
           activeSession,
-          latestSessions: (latestShifts || []).map((s: any) => ({
-            ...s,
-            actual_cash: s.actual_cash != null ? Number(s.actual_cash) : (s.closing_cash != null ? Number(s.closing_cash) : null),
-            closing_cash: s.closing_cash != null ? Number(s.closing_cash) : (s.actual_cash != null ? Number(s.actual_cash) : null)
-          })),
+          latestSessions: (latestShifts || []).map((s: any) => {
+            const openCash = Number(s.opening_cash || 0);
+            const cashSales = Number(s.cash_sales || 0);
+            const cashIn = Number(s.cash_in || 0);
+            const cashOut = Number(s.cash_out || 0);
+            const refunds = Number(s.total_refunds || 0);
+            const computedExpected = openCash + cashSales + cashIn - cashOut - refunds;
+            const expectedCash = Number(s.expected_cash || 0) > 0 ? Number(s.expected_cash) : computedExpected;
+            const rawActual = s.actual_cash != null ? Number(s.actual_cash) : (s.closing_cash != null ? Number(s.closing_cash) : null);
+            const isClosed = s.status === 'CLOSED' || s.status === 'closed' || Boolean(s.closed_at);
+            const isAudited = Boolean(s.is_audited || (s.notes && s.notes.includes('Audit')));
+            const isUncounted = isClosed && (rawActual === null || rawActual === 0) && !isAudited;
+            const discrepancy = isUncounted || !isClosed ? 0 : (Number(rawActual || 0) - expectedCash);
+
+            return {
+              ...s,
+              opening_cash: openCash,
+              cash_sales: cashSales,
+              card_sales: Number(s.card_sales || 0),
+              other_sales: Number(s.other_sales || 0),
+              total_sales: Number(s.total_sales || 0),
+              cash_in: cashIn,
+              cash_out: cashOut,
+              total_refunds: refunds,
+              expected_cash: expectedCash,
+              actual_cash: rawActual,
+              closing_cash: rawActual,
+              discrepancy,
+              is_uncounted: isUncounted,
+              is_audited: isAudited
+            };
+          }),
           invoices: (remoteSales || []).map((s: any) => ({
             ...s,
             items: s.items_json
@@ -3729,11 +3844,38 @@ ipcMain.handle('get-terminal-details', async (_, terminalId) => {
         expected_cash: expectedCash,
         is_online_live: false
       } : null,
-      latestSessions: (latestSessions || []).map((s: any) => ({
-        ...s,
-        actual_cash: s.actual_cash != null ? Number(s.actual_cash) : (s.closing_cash != null ? Number(s.closing_cash) : null),
-        closing_cash: s.closing_cash != null ? Number(s.closing_cash) : (s.actual_cash != null ? Number(s.actual_cash) : null)
-      })),
+      latestSessions: (latestSessions || []).map((s: any) => {
+        const openCash = Number(s.opening_cash || 0);
+        const cashSales = Number(s.cash_sales || 0);
+        const cashIn = Number(s.cash_in || 0);
+        const cashOut = Number(s.cash_out || 0);
+        const refunds = Number(s.total_refunds || 0);
+        const computedExpected = openCash + cashSales + cashIn - cashOut - refunds;
+        const expectedCash = Number(s.expected_cash || 0) > 0 ? Number(s.expected_cash) : computedExpected;
+        const rawActual = s.actual_cash != null ? Number(s.actual_cash) : (s.closing_cash != null ? Number(s.closing_cash) : null);
+        const isClosed = s.status === 'CLOSED' || s.status === 'closed' || Boolean(s.closed_at);
+        const isAudited = Boolean(s.is_audited || (s.notes && s.notes.includes('Audit')));
+        const isUncounted = isClosed && (rawActual === null || rawActual === 0) && !isAudited;
+        const discrepancy = isUncounted || !isClosed ? 0 : (Number(rawActual || 0) - expectedCash);
+
+        return {
+          ...s,
+          opening_cash: openCash,
+          cash_sales: cashSales,
+          card_sales: Number(s.card_sales || 0),
+          other_sales: Number(s.other_sales || 0),
+          total_sales: Number(s.total_sales || 0),
+          cash_in: cashIn,
+          cash_out: cashOut,
+          total_refunds: refunds,
+          expected_cash: expectedCash,
+          actual_cash: rawActual,
+          closing_cash: rawActual,
+          discrepancy,
+          is_uncounted: isUncounted,
+          is_audited: isAudited
+        };
+      }),
       invoices,
       stats,
       is_cloud_live: false

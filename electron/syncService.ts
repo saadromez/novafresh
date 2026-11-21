@@ -631,10 +631,12 @@ export async function pushUnsyncedData(db: Database.Database) {
       const cashIn = Number(txStats?.cash_in || sess.cash_in || 0);
       const cashOut = Number(txStats?.cash_out || sess.cash_out || 0);
 
-      // Opening Balance + Cash Sales + Cash In - Cash Out = Expected Till Cash
-      const expectedCash = Number(sess.opening_cash || 0) + cashSales + cashIn - cashOut;
-      // Discrepancy is 0 while open (shift in progress); counted when closed
-      const discrepancy = isOpen ? 0 : Number((sess.actual_cash || sess.closing_cash || 0) - expectedCash);
+      // Opening Balance + Cash Sales + Cash In - Cash Out - Refunds = Expected Till Cash
+      const totalRefunds = Number(sess.total_refunds || 0);
+      const expectedCash = Number(sess.opening_cash || 0) + cashSales + cashIn - cashOut - totalRefunds;
+      // Discrepancy is only calculated when actual count is explicitly performed (not on auto-closed / uncounted shifts)
+      const hasActualCount = sess.actual_cash != null && (Number(sess.actual_cash) > 0 || sess.is_audited || (sess.notes && sess.notes.includes('Audit')));
+      const discrepancy = isOpen || !hasActualCount ? 0 : Number((Number(sess.actual_cash || sess.closing_cash || 0)) - expectedCash);
 
       await pool.query(`
         INSERT INTO novafreshmart_terminal_shifts (
