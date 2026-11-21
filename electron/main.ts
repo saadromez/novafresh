@@ -6169,60 +6169,95 @@ ipcMain.handle('add-promotion', (_, promo) => {
 
   ipcMain.handle('get-session-transactions', async (_, sessionId) => {
     try {
-      let txs: any[] = db.prepare(`
-        SELECT * FROM session_transactions
-        WHERE session_id = ? OR shift_id = ? OR session_id = (SELECT id FROM sessions WHERE remote_id = ? LIMIT 1)
-        ORDER BY created_at DESC, id DESC
-      `).all(sessionId, sessionId, sessionId);
+      const isAll = !sessionId || sessionId === 'ALL';
+      let txs: any[] = [];
 
-      // If local has no records, attempt pulling from remote MariaDB
-      if (txs.length === 0) {
-        try {
-          const isOnline = await checkRemoteConnection(1500);
-          if (isOnline) {
-            const pool = getRemotePool();
+      if (isAll) {
+        txs = db.prepare(`
+          SELECT st.*, s.username as cashier, s.terminal_id
+          FROM session_transactions st
+          LEFT JOIN sessions s ON st.session_id = s.id
+          ORDER BY st.created_at DESC, st.id DESC LIMIT 300
+        `).all();
+      } else {
+        txs = db.prepare(`
+          SELECT st.*, s.username as cashier, s.terminal_id
+          FROM session_transactions st
+          LEFT JOIN sessions s ON st.session_id = s.id
+          WHERE st.session_id = ? OR st.shift_id = ? OR st.session_id = (SELECT id FROM sessions WHERE remote_id = ? LIMIT 1)
+          ORDER BY st.created_at DESC, st.id DESC
+        `).all(sessionId, sessionId, sessionId);
+      }
+
+      // If local has no records or querying all, attempt syncing with remote MariaDB
+      try {
+        const isOnline = await checkRemoteConnection(1500);
+        if (isOnline) {
+          const pool = getRemotePool();
+          let remoteTxs: any[] = [];
+
+          if (isAll) {
+            const [rows]: any = await pool.query(`
+              SELECT * FROM novafreshmart_session_transactions
+              ORDER BY created_at DESC LIMIT 300
+            `);
+            remoteTxs = rows || [];
+          } else {
             const sess: any = db.prepare('SELECT id, remote_id FROM sessions WHERE id = ? OR remote_id = ?').get(sessionId, sessionId);
             const shiftId = sess?.remote_id || sessionId;
-
-            const [remoteTxs]: any = await pool.query(`
+            const [rows]: any = await pool.query(`
               SELECT * FROM novafreshmart_session_transactions
               WHERE shift_id = ? OR shift_id LIKE ? OR session_id = ?
               ORDER BY created_at DESC
             `, [shiftId, `%-${sessionId}`, sessionId]);
+            remoteTxs = rows || [];
+          }
 
-            if (Array.isArray(remoteTxs) && remoteTxs.length > 0) {
-              const insertStmt = db.prepare(`
-                INSERT OR REPLACE INTO session_transactions (id, session_id, shift_id, terminal_id, type, amount, notes, created_at, synced, remote_id)
-                VALUES (
-                  COALESCE((SELECT id FROM session_transactions WHERE remote_id = @id), NULL),
-                  @session_id, @shift_id, @terminal_id, @type, @amount, @notes, @created_at, 1, @id
-                )
-              `);
-              db.transaction(() => {
-                for (const r of remoteTxs) {
-                  insertStmt.run({
-                    id: r.id,
-                    session_id: sess?.id || r.session_id || sessionId,
-                    shift_id: r.shift_id,
-                    terminal_id: r.terminal_id,
-                    type: r.type,
-                    amount: Number(r.amount || 0),
-                    notes: r.notes || null,
-                    created_at: r.created_at ? new Date(r.created_at).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' ')
-                  });
-                }
-              })();
+          if (Array.isArray(remoteTxs) && remoteTxs.length > 0) {
+            const insertStmt = db.prepare(`
+              INSERT OR REPLACE INTO session_transactions (id, session_id, shift_id, terminal_id, type, amount, notes, created_at, synced, remote_id)
+              VALUES (
+                COALESCE((SELECT id FROM session_transactions WHERE remote_id = @id), NULL),
+                @session_id, @shift_id, @terminal_id, @type, @amount, @notes, @created_at, 1, @id
+              )
+            `);
+            db.transaction(() => {
+              for (const r of remoteTxs) {
+                insertStmt.run({
+                  id: r.id,
+                  session_id: r.session_id || (isAll ? null : sessionId),
+                  shift_id: r.shift_id,
+                  terminal_id: r.terminal_id,
+                  type: r.type,
+                  amount: Number(r.amount || 0),
+                  notes: r.notes || null,
+                  created_at: r.created_at ? new Date(r.created_at).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' ')
+                });
+              }
+            })();
 
+            if (isAll) {
               txs = db.prepare(`
-                SELECT * FROM session_transactions
-                WHERE session_id = ? OR shift_id = ?
-                ORDER BY created_at DESC, id DESC
+                SELECT st.*, s.username as cashier, s.terminal_id
+                FROM session_transactions st
+                LEFT JOIN sessions s ON st.session_id = s.id
+                ORDER BY st.created_at DESC, st.id DESC LIMIT 300
+              `).all();
+            } else {
+              const sess: any = db.prepare('SELECT id, remote_id FROM sessions WHERE id = ? OR remote_id = ?').get(sessionId, sessionId);
+              const shiftId = sess?.remote_id || sessionId;
+              txs = db.prepare(`
+                SELECT st.*, s.username as cashier, s.terminal_id
+                FROM session_transactions st
+                LEFT JOIN sessions s ON st.session_id = s.id
+                WHERE st.session_id = ? OR st.shift_id = ?
+                ORDER BY st.created_at DESC, st.id DESC
               `).all(sess?.id || sessionId, shiftId);
             }
           }
-        } catch (err: any) {
-          console.warn('[get-session-transactions] Remote fetch error:', err.message);
         }
+      } catch (err: any) {
+        console.warn('[get-session-transactions] Remote fetch error:', err.message);
       }
 
       return txs;
@@ -6230,7 +6265,7 @@ ipcMain.handle('add-promotion', (_, promo) => {
       console.error('[get-session-transactions] Error:', err);
       return [];
     }
-  })
+  });
 
   ipcMain.handle('delete-session-transaction', async (_, txId) => {
     try {

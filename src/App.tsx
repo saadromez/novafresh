@@ -33,7 +33,7 @@ import {
   Tag, FileText, AlertTriangle, ChevronDown, ChevronUp, Plus, 
   Settings, HelpCircle, LogOut, Search, Bell, Mail, ArrowUpRight,
   BarChart2, Wallet, CreditCard, DollarSign, X, Trash2, Key, RotateCcw, Building2,
-  Sparkles, Server, HardDrive
+  Sparkles, Server, HardDrive, Coins
 } from 'lucide-react'
 
 function App() {
@@ -714,6 +714,7 @@ function App() {
           <NavItem icon={LayoutDashboard} label="Dashboard" id="dashboard" />
           <NavItem icon={ShoppingCart} label="POS Sales Screen" id="pos" badge="POS" />
           <NavItem icon={Wallet} label="Day Sale & Shifts" id="day_sale" />
+          <NavItem icon={Coins} label="Cash In & Out (Petty Cash)" id="cash_movements" />
           {canAccessInvoices && <NavItem icon={FileText} label="Sales Invoices" id="sales_history" />}
           {canAccessRefunds && <NavItem icon={RotateCcw} label="Refunds & Returns" id="refunds" />}
 
@@ -955,6 +956,7 @@ function App() {
           {currentView === 'credit' && canAccessCredit && <CreditMgmtView currentUser={currentUser} />}
           {currentView === 'inventory_ledger' && canAccessLedger && <InventoryLedgerView products={products} onRestock={() => setShowGRNModal({ id: null, name: 'Direct Restock' })} currentUser={currentUser} loadProducts={loadProducts} />}
           {currentView === 'day_sale' && <DaySaleView session={session} invoices={invoices} loadSession={loadSession} loadInvoices={loadInvoices} currentUser={currentUser} />}
+          {currentView === 'cash_movements' && <DaySaleView session={session} invoices={invoices} loadSession={loadSession} loadInvoices={loadInvoices} currentUser={currentUser} initialTab="movements" />}
           {currentView === 'sales_history' && canAccessInvoices && <SalesHistoryView currentUser={currentUser} />}
           {currentView === 'branches' && canAccessBranches && <BranchTerminalBackoffice currentUser={currentUser} />}
           {currentView === 'server_backup' && canAccessBackupHub && <MasterServerBackupView currentUser={currentUser} />}

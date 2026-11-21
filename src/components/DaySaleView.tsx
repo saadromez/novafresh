@@ -3,7 +3,7 @@ import { printReceiptViaAgent, isAgentRunning } from '../lib/printAgent';
 import { 
   Wallet, LogOut, FileText, Clock, ArrowDownRight, ArrowUpRight, Plus, 
   CheckCircle, Trash2, Printer, Eye, X, AlertCircle, TrendingUp, Calendar,
-  Search, RefreshCw, CreditCard, ArrowRightLeft, DollarSign
+  Search, RefreshCw, CreditCard, ArrowRightLeft, DollarSign, Coins
 } from 'lucide-react';
 import { formatSriLankaDateTime, formatReceiptDate } from '../utils/dateUtils';
 
@@ -20,7 +20,7 @@ const parseSqliteUtc = (dStr: any): Date => {
   return isNaN(d.getTime()) ? new Date(dStr) : d;
 };
 
-export default function DaySaleView({ session, invoices = [], loadSession, loadInvoices, currentUser }: any) {
+export default function DaySaleView({ session, invoices = [], loadSession, loadInvoices, currentUser, initialTab = 'current' }: any) {
   const role = (currentUser?.role || '').toLowerCase();
   const isAdmin = role === 'admin' || role === 'manager';
   const [activeSession, setActiveSession] = useState<any>(session);
@@ -29,11 +29,56 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
   const [transactions, setTransactions] = useState<any[]>([]);
   const [showTxModal, setShowTxModal] = useState(false);
   const [newTx, setNewTx] = useState({ type: 'CASH_IN', amount: '', notes: '' });
-  const [tab, setTab] = useState<'current' | 'history'>('current');
+  const [tab, setTab] = useState<'current' | 'history' | 'movements'>(initialTab || 'current');
   const [oldSessions, setOldSessions] = useState<any[]>([]);
   const [settings, setSettings] = useState<any>({});
   const [terminalsList, setTerminalsList] = useState<any[]>([]);
   const [historyTerminalFilter, setHistoryTerminalFilter] = useState<string>('ALL');
+
+  // All Cash In / Out Movements Tab State
+  const [allMovements, setAllMovements] = useState<any[]>([]);
+  const [loadingMovements, setLoadingMovements] = useState<boolean>(false);
+  const [movementTypeFilter, setMovementTypeFilter] = useState<'ALL' | 'CASH_IN' | 'CASH_OUT'>('ALL');
+  const [movementSearch, setMovementSearch] = useState<string>('');
+
+  const loadAllMovements = async () => {
+    setLoadingMovements(true);
+    try {
+      // @ts-ignore
+      const res = await window.db.invoke('get-session-transactions', 'ALL');
+      setAllMovements(res || []);
+    } catch (err) {
+      console.warn('Failed to load all movements:', err);
+    } finally {
+      setLoadingMovements(false);
+    }
+  };
+
+  const handleDeleteSessionTx = async (txId: any) => {
+    if (currentUser?.role?.toLowerCase() !== 'admin') {
+      alert('Security Restriction: Only System Administrators can delete cash movement records.');
+      return;
+    }
+    if (!confirm('Are you sure you want to delete this cash movement transaction? Session totals will be automatically recalculated.')) return;
+    try {
+      // @ts-ignore
+      await window.db.invoke('delete-session-transaction', txId);
+      await loadAllMovements();
+      if (activeSession) {
+        await loadTransactions();
+        await refreshActiveSession();
+      }
+      alert('Cash movement transaction deleted successfully.');
+    } catch (err: any) {
+      alert('Error: ' + err.message);
+    }
+  };
+
+  useEffect(() => {
+    if (initialTab) {
+      setTab(initialTab);
+    }
+  }, [initialTab]);
 
   // History filtering & search state
   const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'yesterday' | 'week' | 'month' | 'custom'>('all');
@@ -96,6 +141,8 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
   useEffect(() => {
     if (tab === 'history') {
       loadOldSessions();
+    } else if (tab === 'movements') {
+      loadAllMovements();
     }
   }, [tab, dateFilter, customStartDate, customEndDate, historyTerminalFilter]);
 
@@ -573,6 +620,32 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
     }
   };
 
+  const filteredMovements = allMovements.filter((tx: any) => {
+    const isTxIn = (tx.type || '').toUpperCase() === 'CASH_IN';
+    if (movementTypeFilter === 'CASH_IN' && !isTxIn) return false;
+    if (movementTypeFilter === 'CASH_OUT' && isTxIn) return false;
+    if (movementSearch.trim()) {
+      const q = movementSearch.toLowerCase();
+      const match =
+        String(tx.id || '').includes(q) ||
+        String(tx.session_id || '').includes(q) ||
+        String(tx.shift_id || '').toLowerCase().includes(q) ||
+        String(tx.notes || '').toLowerCase().includes(q) ||
+        String(tx.cashier || '').toLowerCase().includes(q) ||
+        String(tx.terminal_id || '').toLowerCase().includes(q);
+      if (!match) return false;
+    }
+    return true;
+  });
+
+  const totalCashIn = allMovements
+    .filter((tx: any) => (tx.type || '').toUpperCase() === 'CASH_IN')
+    .reduce((sum: number, tx: any) => sum + Number(tx.amount || 0), 0);
+  const totalCashOut = allMovements
+    .filter((tx: any) => (tx.type || '').toUpperCase() !== 'CASH_IN')
+    .reduce((sum: number, tx: any) => sum + Number(tx.amount || 0), 0);
+  const netMovement = totalCashIn - totalCashOut;
+
   return (
     <div className="bg-[#FAFAFA] p-3 sm:p-5 w-full min-h-full flex flex-col pb-16">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 shrink-0">
@@ -624,8 +697,12 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
       </div>
 
       <div className="flex gap-2 mb-4 shrink-0">
-        <button onClick={() => setTab('current')} className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors ${tab === 'current' ? 'bg-brand-primary text-white shadow-sm' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>Current Session</button>
-        <button onClick={() => setTab('history')} className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors ${tab === 'history' ? 'bg-brand-primary text-white shadow-sm' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>Session History</button>
+        <button onClick={() => setTab('current')} className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors cursor-pointer ${tab === 'current' ? 'bg-brand-primary text-white shadow-sm' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>Current Session</button>
+        <button onClick={() => setTab('history')} className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors cursor-pointer ${tab === 'history' ? 'bg-brand-primary text-white shadow-sm' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>Session History</button>
+        <button onClick={() => { setTab('movements'); loadAllMovements(); }} className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-colors flex items-center gap-1.5 cursor-pointer ${tab === 'movements' ? 'bg-brand-primary text-white shadow-sm' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+          <Coins size={14} />
+          <span>Cash In &amp; Out Records</span>
+        </button>
       </div>
 
       {tab === 'history' ? (
@@ -758,6 +835,8 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
                   <th className="px-4 py-3 font-bold">Opened</th>
                   <th className="px-4 py-3 font-bold">Closed</th>
                   <th className="px-4 py-3 font-bold text-right">Opening Float</th>
+                  <th className="px-4 py-3 font-bold text-right text-emerald-600">Cash In (+)</th>
+                  <th className="px-4 py-3 font-bold text-right text-rose-600">Cash Out (-)</th>
                   {isAdmin && <th className="px-4 py-3 font-bold text-right">Expected</th>}
                   <th className="px-4 py-3 font-bold text-right">Actual Count</th>
                   {isAdmin && <th className="px-4 py-3 font-bold text-center">Difference</th>}
@@ -803,8 +882,20 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
                       <td className="px-4 py-3 text-gray-600 text-xs font-mono">{formatSriLankaDateTime(s.opened_at)}</td>
                       <td className="px-4 py-3 text-gray-600 text-xs font-mono">{s.closed_at ? formatSriLankaDateTime(s.closed_at) : '-'}</td>
                       <td className="px-4 py-3 text-right font-medium">Rs. {(s.opening_cash || 0).toLocaleString()}</td>
+                      <td className="px-4 py-3 text-right font-bold text-emerald-600 font-mono">
+                        {Number(s.cash_in || 0) > 0 ? `+Rs. ${Number(s.cash_in).toLocaleString()}` : '-'}
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold text-rose-600 font-mono">
+                        {Number(s.cash_out || 0) > 0 ? `-Rs. ${Number(s.cash_out).toLocaleString()}` : '-'}
+                      </td>
                       {isAdmin && <td className="px-4 py-3 text-right font-medium">{s.expected_cash != null ? `Rs. ${Number(s.expected_cash).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-'}</td>}
-                      <td className="px-4 py-3 text-right font-bold text-brand-dark">{hasActual ? `Rs. ${actual.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-'}</td>
+                      <td className="px-4 py-3 text-right font-bold text-brand-dark">
+                        {hasActual ? `Rs. ${actual.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 border border-slate-200">
+                            Uncounted
+                          </span>
+                        )}
+                      </td>
                       {isAdmin && (
                       <td className="px-4 py-3 text-center">
                         {hasActual ? (
@@ -815,7 +906,11 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
                           }`}>
                             {isBalanced ? 'Balanced' : (diff > 0 ? `+Rs. ${diff.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `-Rs. ${Math.abs(diff).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`)}
                           </span>
-                        ) : '-'}
+                        ) : (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                            Pending Audit
+                          </span>
+                        )}
                       </td>
                       )}
                       <td className="px-4 py-3 text-center">
@@ -851,8 +946,197 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
                 })}
                 {oldSessions.length === 0 && (
                   <tr>
-                    <td colSpan={isAdmin ? 10 : 8} className="px-4 py-12 text-center text-gray-400">
+                    <td colSpan={isAdmin ? 12 : 10} className="px-4 py-12 text-center text-gray-400">
                       No closed sessions found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : tab === 'movements' ? (
+        <div className="flex-1 bg-white border border-gray-200 rounded-2xl overflow-hidden flex flex-col shadow-sm">
+          {/* Header Bar */}
+          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex flex-col gap-3 shrink-0">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="font-bold text-brand-dark flex items-center gap-2">
+                  <Coins className="text-brand-primary" size={18} />
+                  <span>Cash In &amp; Cash Out Records (Petty Cash &amp; Drawer Drops)</span>
+                </h3>
+                <p className="text-xs text-gray-400">
+                  Full store-wide ledger of petty cash top-ups, vendor payouts, drawer drops, and expenses.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {activeSession && (
+                  <button
+                    onClick={() => setShowTxModal(true)}
+                    className="px-3.5 py-1.5 bg-brand-primary text-white rounded-xl text-xs font-bold flex items-center hover:bg-brand-primary/90 transition-all shadow-xs cursor-pointer"
+                  >
+                    <Plus size={14} className="mr-1" /> Add Cash Movement
+                  </button>
+                )}
+                <button
+                  onClick={() => loadAllMovements()}
+                  disabled={loadingMovements}
+                  className="px-3 py-1.5 bg-white border border-gray-200 text-gray-700 rounded-xl text-xs font-bold flex items-center hover:bg-gray-100 transition-colors cursor-pointer"
+                  title="Refresh Cash Movements"
+                >
+                  <RefreshCw size={13} className={`mr-1.5 ${loadingMovements ? 'animate-spin' : ''}`} /> Refresh
+                </button>
+                <span className="text-xs font-bold bg-white border border-gray-200 px-3 py-1 rounded-full text-gray-600">
+                  {filteredMovements.length} Records
+                </span>
+              </div>
+            </div>
+
+            {/* Metrics cards row */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-gray-200/70">
+              <div className="bg-white border border-emerald-200/60 rounded-xl p-3 flex items-center justify-between">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-600">Total Cash In (+)</p>
+                  <p className="text-lg font-black text-emerald-700 font-mono">Rs. {totalCashIn.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                </div>
+                <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                  <ArrowDownRight size={20} />
+                </div>
+              </div>
+
+              <div className="bg-white border border-rose-200/60 rounded-xl p-3 flex items-center justify-between">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-rose-600">Total Cash Out (-)</p>
+                  <p className="text-lg font-black text-rose-700 font-mono">Rs. {totalCashOut.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                </div>
+                <div className="w-9 h-9 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center">
+                  <ArrowUpRight size={20} />
+                </div>
+              </div>
+
+              <div className="bg-white border border-blue-200/60 rounded-xl p-3 flex items-center justify-between">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-blue-600">Net Movement</p>
+                  <p className={`text-lg font-black font-mono ${netMovement >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                    {netMovement >= 0 ? '+' : ''}Rs. {netMovement.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </p>
+                </div>
+                <div className="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                  <Coins size={20} />
+                </div>
+              </div>
+            </div>
+
+            {/* Filters & Search */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+              <div className="flex items-center gap-1.5">
+                {(['ALL', 'CASH_IN', 'CASH_OUT'] as const).map(t => (
+                  <button
+                    key={t}
+                    onClick={() => setMovementTypeFilter(t)}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      movementTypeFilter === t
+                        ? 'bg-brand-primary text-white shadow-xs'
+                        : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-100'
+                    }`}
+                  >
+                    {t === 'ALL' ? 'All Movements' : t === 'CASH_IN' ? 'Cash In (+)' : 'Cash Out (-)'}
+                  </button>
+                ))}
+              </div>
+
+              <div className="relative">
+                <Search size={13} className="absolute left-2.5 top-2.5 text-gray-400" />
+                <input
+                  type="text"
+                  placeholder="Search reason, #session, terminal..."
+                  value={movementSearch}
+                  onChange={e => setMovementSearch(e.target.value)}
+                  className="pl-7 pr-3 py-1.5 bg-white border border-gray-200 rounded-xl text-xs font-medium text-slate-800 placeholder-gray-400 outline-none w-56 sm:w-64 focus:border-brand-primary"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Movements Table */}
+          <div className="flex-1 overflow-auto">
+            <table className="w-full text-left text-sm whitespace-nowrap">
+              <thead className="bg-gray-50 border-b border-gray-200 text-xs uppercase tracking-wider text-gray-500">
+                <tr>
+                  <th className="px-4 py-3 font-bold">Date &amp; Time</th>
+                  <th className="px-4 py-3 font-bold">Type</th>
+                  <th className="px-4 py-3 font-bold text-right">Amount</th>
+                  <th className="px-4 py-3 font-bold">Session / Shift Ref</th>
+                  <th className="px-4 py-3 font-bold">Terminal</th>
+                  <th className="px-4 py-3 font-bold">Reason / Notes</th>
+                  {isAdmin && <th className="px-4 py-3 font-bold text-center">Actions</th>}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 text-xs">
+                {filteredMovements.map((m: any, idx: number) => {
+                  const isCashIn = m.type === 'CASH_IN';
+                  const amt = Number(m.amount || 0);
+                  return (
+                    <tr key={m.id || idx} className="hover:bg-gray-50 transition-colors">
+                      <td className="px-4 py-3 text-gray-600 font-mono">
+                        {formatSriLankaDateTime(m.created_at)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold ${
+                          isCashIn
+                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                            : 'bg-rose-50 text-rose-700 border border-rose-200'
+                        }`}>
+                          {isCashIn ? (
+                            <><ArrowDownRight size={12} className="mr-1" /> Cash In</>
+                          ) : (
+                            <><ArrowUpRight size={12} className="mr-1" /> Cash Out</>
+                          )}
+                        </span>
+                      </td>
+                      <td className={`px-4 py-3 text-right font-black font-mono text-sm ${
+                        isCashIn ? 'text-emerald-600' : 'text-rose-600'
+                      }`}>
+                        {isCashIn ? '+' : '-'}Rs. {amt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td className="px-4 py-3 font-medium text-slate-700 font-mono">
+                        {m.shift_id ? (
+                          <span className="bg-slate-100 text-slate-800 px-2 py-0.5 rounded border border-slate-200 font-bold">
+                            {m.shift_id}
+                          </span>
+                        ) : m.session_id ? (
+                          <span className="bg-slate-100 text-slate-800 px-2 py-0.5 rounded border border-slate-200 font-bold">
+                            #{m.session_id}
+                          </span>
+                        ) : '-'}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="bg-amber-50 text-amber-900 border border-amber-200 font-mono font-bold px-2 py-0.5 rounded text-[10px]">
+                          {m.terminal_id || 'TERM-01'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-700 max-w-xs truncate" title={m.notes || ''}>
+                        {m.notes || <span className="text-gray-400 italic">No notes provided</span>}
+                      </td>
+                      {isAdmin && (
+                        <td className="px-4 py-3 text-center">
+                          <button
+                            onClick={() => handleDeleteSessionTx(m.id || m.remote_id)}
+                            className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                            title="Delete Record (Admin Only)"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+                {filteredMovements.length === 0 && (
+                  <tr>
+                    <td colSpan={isAdmin ? 7 : 6} className="px-4 py-12 text-center text-gray-400">
+                      No cash movement records found.
                     </td>
                   </tr>
                 )}
