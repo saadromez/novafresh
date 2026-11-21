@@ -51,7 +51,23 @@ export default function SettingsView() {
     const onUpdateProgress = (_: any, info: any) => { setUpdateStatus('downloading'); setUpdatePercent(Math.round(info?.percent || 0)); };
     const onUpdateDownloaded = (_: any, info: any) => { setUpdateStatus('ready'); setUpdateVersion(info?.version || ''); };
     const onUpdateNone = () => { setUpdateStatus('none'); };
-    const onUpdateError = (_: any, info: any) => { setUpdateStatus('error'); setUpdateError(info?.message || 'Update check failed'); };
+    const onUpdateError = (_: any, info: any) => {
+      const rawMsg = String(info?.message || '');
+      const isNotFound =
+        rawMsg.includes('404') ||
+        rawMsg.toLowerCase().includes('github') ||
+        rawMsg.toLowerCase().includes('no published version') ||
+        rawMsg.toLowerCase().includes('releases.atom') ||
+        rawMsg.toLowerCase().includes('cannot find latest');
+
+      if (isNotFound) {
+        setUpdateStatus('none');
+        setUpdateError('');
+      } else {
+        setUpdateStatus('error');
+        setUpdateError('Unable to check for updates. Please check your internet connection.');
+      }
+    };
     // @ts-ignore
     if (window.ipcRenderer?.on) {
       // @ts-ignore
@@ -643,7 +659,7 @@ export default function SettingsView() {
 
             {updateStatus === 'error' && (
               <div className="flex items-center gap-2 text-sm font-bold text-amber-700 bg-amber-50 border border-amber-200 px-4 py-2.5 rounded-xl">
-                <AlertCircle size={16} /> {updateError || 'Could not check for updates. Check internet connection.'}
+                <AlertCircle size={16} /> {updateError || 'Unable to check for updates. Please check your internet connection.'}
               </div>
             )}
 

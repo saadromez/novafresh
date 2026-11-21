@@ -7267,8 +7267,23 @@ app.whenReady().then(() => {
     });
 
     autoUpdater.on('error', (err: any) => {
+      const msg = String(err?.message || '');
+      const isNotFoundOrNoVersion =
+        msg.includes('404') ||
+        msg.toLowerCase().includes('releases.atom') ||
+        msg.toLowerCase().includes('no published version') ||
+        msg.toLowerCase().includes('cannot find latest') ||
+        msg.toLowerCase().includes('github');
+
       BrowserWindow.getAllWindows().forEach(w => {
-        if (!w.isDestroyed()) w.webContents.send('update-error', { message: err?.message || 'Update check failed' });
+        if (!w.isDestroyed()) {
+          if (isNotFoundOrNoVersion) {
+            // If no release published yet or 404, treat as current version is latest
+            w.webContents.send('update-not-available');
+          } else {
+            w.webContents.send('update-error', { message: 'Unable to check for updates. Please check your internet connection.' });
+          }
+        }
       });
     });
 
