@@ -35,6 +35,26 @@ export default function DashboardView({ currentUser }: { currentUser: any }) {
   const [adminAuthError, setAdminAuthError] = useState<string>('');
   const [isAuthorizingUpdate, setIsAuthorizingUpdate] = useState<boolean>(false);
   const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [isManualSyncing, setIsManualSyncing] = useState<boolean>(false);
+
+  const handleForceSyncCatalog = async () => {
+    setIsManualSyncing(true);
+    try {
+      // @ts-ignore
+      if (window.db?.triggerSync) {
+        // @ts-ignore
+        await window.db.triggerSync(true);
+      } else {
+        // @ts-ignore
+        await window.db.invoke('trigger-sync', true);
+      }
+      await loadDashboardData(false);
+    } catch (err: any) {
+      alert('Cloud refresh error: ' + (err.message || String(err)));
+    } finally {
+      setIsManualSyncing(false);
+    }
+  };
 
   useEffect(() => {
     loadDashboardData(false);
@@ -723,14 +743,25 @@ export default function DashboardView({ currentUser }: { currentUser: any }) {
               <span>Apply & Restart POS {data.isAdmin ? '' : '(Admin Auth)'}</span>
             </button>
           ) : (
-            <button
-              onClick={handleCheckForUpdates}
-              disabled={updateStatus === 'checking' || updateStatus === 'downloading'}
-              className="flex items-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 disabled:opacity-60 font-bold text-xs rounded-2xl transition-all cursor-pointer border border-slate-200"
-            >
-              <RefreshCw size={14} className={updateStatus === 'checking' ? 'animate-spin text-emerald-600' : ''} />
-              <span>{updateStatus === 'checking' ? 'Checking Updates...' : 'Check for Updates'}</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleForceSyncCatalog}
+                disabled={isManualSyncing}
+                title="Force refresh entire catalog, GRNs, and stock from cloud database"
+                className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 disabled:opacity-60 font-bold text-xs rounded-2xl transition-all cursor-pointer border border-slate-200"
+              >
+                <RefreshCw size={13} className={isManualSyncing ? 'animate-spin text-emerald-600' : ''} />
+                <span>{isManualSyncing ? 'Syncing...' : 'Force Cloud Sync'}</span>
+              </button>
+              <button
+                onClick={handleCheckForUpdates}
+                disabled={updateStatus === 'checking' || updateStatus === 'downloading'}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 disabled:opacity-60 font-bold text-xs rounded-2xl transition-all cursor-pointer border border-slate-200"
+              >
+                <RefreshCw size={13} className={updateStatus === 'checking' ? 'animate-spin text-emerald-600' : ''} />
+                <span>{updateStatus === 'checking' ? 'Checking Updates...' : 'Check for Updates'}</span>
+              </button>
+            </div>
           )}
 
           {updateStatus === 'none' && (

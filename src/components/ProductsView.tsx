@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { 
   Package, Plus, Search, Layers, Briefcase, Trash2, X, Scale, 
-  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Loader2 
+  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Loader2, RefreshCw 
 } from 'lucide-react';
 import { PRODUCT_UNITS, formatQuantityWithUnit } from '../utils/units';
 
@@ -33,10 +33,53 @@ export default function ProductsView({ products, loadProducts, currentUser }: an
   const [newCat, setNewCat] = useState({ name: '', parent_id: '' })
   const [newBrand, setNewBrand] = useState('')
   const [activeProduct, setActiveProduct] = useState<any>(null)
+  const [isRefreshing, setIsRefreshing] = useState(false)
 
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin';
 
-  useEffect(() => { loadMeta() }, [])
+  useEffect(() => {
+    loadMeta();
+    const refreshHandler = () => {
+      loadMeta();
+      if (loadProducts) loadProducts();
+    };
+    // @ts-ignore
+    if (window.ipcRenderer?.on) {
+      // @ts-ignore
+      window.ipcRenderer.on('products-updated', refreshHandler);
+      // @ts-ignore
+      window.ipcRenderer.on('sync-data-updated', refreshHandler);
+    }
+    return () => {
+      // @ts-ignore
+      if (window.ipcRenderer?.off) {
+        // @ts-ignore
+        window.ipcRenderer.off('products-updated', refreshHandler);
+        // @ts-ignore
+        window.ipcRenderer.off('sync-data-updated', refreshHandler);
+      }
+    };
+  }, [])
+
+  const handleForceRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      // @ts-ignore
+      if (window.db?.triggerSync) {
+        // @ts-ignore
+        await window.db.triggerSync(true);
+      } else {
+        // @ts-ignore
+        await window.db.invoke('trigger-sync', true);
+      }
+      if (loadProducts) await loadProducts();
+      await loadMeta();
+    } catch (err: any) {
+      alert('Error syncing catalog from cloud: ' + (err.message || String(err)));
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   const loadMeta = async () => {
     // @ts-ignore
@@ -219,9 +262,20 @@ export default function ProductsView({ products, loadProducts, currentUser }: an
             <button onClick={() => setActiveTab('brands')} className={`px-3 py-1.5 rounded-lg font-black transition-all ${activeTab === 'brands' ? 'bg-white shadow-xs text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>Brands</button>
           </div>
           {activeTab === 'products' && (
-            <button onClick={() => { setEditingProductId(null); setNewProduct({ ...EMPTY_PRODUCT }); setShowAdd(true) }} className="bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white px-3.5 py-1.5 rounded-xl font-black text-xs flex items-center shadow-sm shadow-emerald-600/30 transition-all cursor-pointer">
-              <Plus size={15} className="mr-1.5" /> New Product
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleForceRefresh}
+                disabled={isRefreshing}
+                title="Force pull all latest catalog changes, new products, and GRNs from cloud MariaDB"
+                className="bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 px-3 py-1.5 rounded-xl font-bold text-xs flex items-center transition-all cursor-pointer border border-slate-200"
+              >
+                <RefreshCw size={13} className={`mr-1.5 ${isRefreshing ? 'animate-spin text-emerald-600' : ''}`} />
+                {isRefreshing ? 'Syncing...' : 'Force Cloud Refresh'}
+              </button>
+              <button onClick={() => { setEditingProductId(null); setNewProduct({ ...EMPTY_PRODUCT }); setShowAdd(true) }} className="bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white px-3.5 py-1.5 rounded-xl font-black text-xs flex items-center shadow-sm shadow-emerald-600/30 transition-all cursor-pointer">
+                <Plus size={15} className="mr-1.5" /> New Product
+              </button>
+            </div>
           )}
           {activeTab === 'categories' && (
             <button onClick={() => setShowAddCat(true)} className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-1.5 rounded-xl font-black text-xs flex items-center shadow-sm transition-all cursor-pointer">

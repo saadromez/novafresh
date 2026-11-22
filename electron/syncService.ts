@@ -1676,11 +1676,16 @@ export async function pullLatestData(db: Database.Database) {
     syncLog(`[PULL] Pulled ${remoteProds ? remoteProds.length : 0} active products from cloud`);
 
     if (Array.isArray(remoteProds) && remoteProds.length > 0) {
-      // Ensure default fallback category exists
+      // Ensure default guaranteed fallback category exists in local SQLite
+      let safeFallbackCatId = 1;
       try {
-        const anyCat = db.prepare('SELECT id FROM categories LIMIT 1').get();
-        if (!anyCat) {
-          db.prepare('INSERT INTO categories (name) VALUES ("General")').run();
+        const catGeneral: any = db.prepare("SELECT id FROM categories WHERE LOWER(TRIM(name)) = 'general' LIMIT 1").get()
+          || db.prepare('SELECT id FROM categories ORDER BY id ASC LIMIT 1').get();
+        if (catGeneral) {
+          safeFallbackCatId = Number(catGeneral.id);
+        } else {
+          const insGeneral = db.prepare('INSERT INTO categories (name, synced) VALUES ("General", 1)').run();
+          safeFallbackCatId = Number(insGeneral.lastInsertRowid);
         }
       } catch (_) {}
 
@@ -1689,13 +1694,13 @@ export async function pullLatestData(db: Database.Database) {
 
       // Helper map of categories
       const catMap = new Map<string, number>();
-      db.prepare('SELECT id, name FROM categories').all().forEach((c: any) => {
-        if (c.name) catMap.set(c.name.trim().toLowerCase(), Number(c.id));
-      });
-      const firstCatRow: any = db.prepare('SELECT id FROM categories LIMIT 1').get();
-      const defaultCatId = catMap.get('general') || (firstCatRow?.id ? Number(firstCatRow.id) : 1);
+      try {
+        db.prepare('SELECT id, name FROM categories').all().forEach((c: any) => {
+          if (c.name) catMap.set(c.name.trim().toLowerCase(), Number(c.id));
+        });
+      } catch (_) {}
 
-      const findByBarcode = db.prepare('SELECT id, synced FROM products WHERE barcode = ? AND barcode IS NOT NULL AND barcode != "" LIMIT 1');
+      const findByBarcode = db.prepare("SELECT id, synced FROM products WHERE barcode = ? AND barcode IS NOT NULL AND barcode != '' LIMIT 1");
       const findById = db.prepare('SELECT id, synced FROM products WHERE id = ? LIMIT 1');
 
       const updateProd = db.prepare(`
@@ -1736,27 +1741,37 @@ export async function pullLatestData(db: Database.Database) {
             const allowOverride = p.allow_price_override !== 0 && p.allow_price_override !== false ? 1 : 0;
             const safeUnit = (p.unit && !/^\d+$/.test(String(p.unit).trim())) ? p.unit : 'pc';
 
-            let localCatId = defaultCatId;
-            if (p.category && p.category.trim()) {
-              const lowerName = p.category.trim().toLowerCase();
-              if (catMap.has(lowerName)) {
-                localCatId = catMap.get(lowerName)!;
+            // Foreign-key safe category resolution
+            let localCatId = safeFallbackCatId;
+            if (p.category && String(p.category).trim()) {
+              const cleanCatName = String(p.category).trim();
+              const lowerCat = cleanCatName.toLowerCase();
+              if (catMap.has(lowerCat)) {
+                localCatId = catMap.get(lowerCat)!;
               } else {
                 try {
-                  const insCat = db.prepare('INSERT INTO categories (name) VALUES (?)').run(p.category.trim());
+                  const insCat = db.prepare('INSERT INTO categories (name, synced) VALUES (?, 1)').run(cleanCatName);
                   localCatId = Number(insCat.lastInsertRowid);
-                  catMap.set(lowerName, localCatId);
+                  catMap.set(lowerCat, localCatId);
                 } catch (_) {
-                  const ex: any = db.prepare('SELECT id FROM categories WHERE LOWER(name) = ?').get(lowerName);
+                  const ex: any = db.prepare('SELECT id FROM categories WHERE LOWER(TRIM(name)) = ?').get(lowerCat);
                   if (ex) {
-                    localCatId = ex.id;
-                    catMap.set(lowerName, localCatId);
+                    localCatId = Number(ex.id);
+                    catMap.set(lowerCat, localCatId);
                   }
                 }
               }
             } else if (p.category_id && !isNaN(Number(p.category_id)) && Number(p.category_id) > 0) {
               const chk: any = db.prepare('SELECT id FROM categories WHERE id = ?').get(Number(p.category_id));
-              if (chk) localCatId = Number(p.category_id);
+              if (chk) {
+                localCatId = Number(chk.id);
+              }
+            }
+
+            // Guaranteed validation: ensure localCatId actually exists in SQLite categories table
+            const catValid: any = db.prepare('SELECT id FROM categories WHERE id = ? LIMIT 1').get(localCatId);
+            if (!catValid) {
+              localCatId = safeFallbackCatId;
             }
 
             // Check if product already exists locally
@@ -1769,9 +1784,7 @@ export async function pullLatestData(db: Database.Database) {
             }
 
             if (localMatch) {
-              // Only skip remote update if this device itself has pending unsynced local edits AND
-              // the remote product was NOT updated more recently (stock changes from GRN/restock on other terminals must always win)
-              // We no longer block on synced=0 alone â€” stock updates from other terminals must propagate
+              // Always update product with authoritative cloud catalog data
               updateProd.run(
                 p.name,
                 Number(p.price || 0),
@@ -1789,9 +1802,8 @@ export async function pullLatestData(db: Database.Database) {
                 localMatch.id
               );
             } else {
-              // Try inserting with prodId if available, otherwise let SQLite auto-generate id
-              const idInUse = !isNaN(prodId) ? findById.get(prodId) : true;
-              if (!idInUse) {
+              // Insert new product: try prodId first, then fallback safely
+              try {
                 insertProdWithId.run(
                   prodId,
                   p.name,
@@ -1811,22 +1823,41 @@ export async function pullLatestData(db: Database.Database) {
                 try {
                   db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('products', ?) ON CONFLICT(name) DO UPDATE SET seq = MAX(seq, excluded.seq)").run(prodId);
                 } catch (_) {}
-              } else {
-                insertProdAuto.run(
-                  p.name,
-                  Number(p.price || 0),
-                  Number(p.cost_price || 0),
-                  adjustedStock,
-                  localCatId,
-                  p.branch_id || 'ALL',
-                  Number(p.wholesale_price || 0),
-                  p.barcode || '',
-                  safeUnit,
-                  p.is_scale_item ? 1 : 0,
-                  p.plu || null,
-                  allowOverride,
-                  p.expiry_date || null
-                );
+              } catch (insErr: any) {
+                try {
+                  updateProd.run(
+                    p.name,
+                    Number(p.price || 0),
+                    Number(p.wholesale_price || 0),
+                    Number(p.cost_price || 0),
+                    p.barcode || '',
+                    p.branch_id || 'ALL',
+                    safeUnit,
+                    adjustedStock,
+                    localCatId,
+                    p.is_scale_item ? 1 : 0,
+                    p.plu || null,
+                    allowOverride,
+                    p.expiry_date || null,
+                    prodId
+                  );
+                } catch (_) {
+                  insertProdAuto.run(
+                    p.name,
+                    Number(p.price || 0),
+                    Number(p.cost_price || 0),
+                    adjustedStock,
+                    localCatId,
+                    p.branch_id || 'ALL',
+                    Number(p.wholesale_price || 0),
+                    p.barcode || '',
+                    safeUnit,
+                    p.is_scale_item ? 1 : 0,
+                    p.plu || null,
+                    allowOverride,
+                    p.expiry_date || null
+                  );
+                }
               }
             }
           } catch (itemErr: any) {
@@ -1898,7 +1929,7 @@ export async function pullLatestData(db: Database.Database) {
           updated_at = excluded.updated_at
       `);
 
-      const findStaff = db.prepare('SELECT id FROM employees WHERE name = ? OR (nic IS NOT NULL AND nic != "" AND nic = ?)');
+      const findStaff = db.prepare("SELECT id FROM employees WHERE name = ? OR (nic IS NOT NULL AND nic != '' AND nic = ?)");
       const insertStaff = db.prepare('INSERT INTO employees (name, nic, phone, basic_salary) VALUES (?, ?, ?, ?)');
       const updateStaff = db.prepare('UPDATE employees SET nic = COALESCE(?, nic), phone = COALESCE(?, phone), basic_salary = COALESCE(?, basic_salary) WHERE id = ?');
 
@@ -2925,6 +2956,16 @@ export async function pullLatestData(db: Database.Database) {
   } catch (err) {
     console.warn('[Sync] Could not pull remote inventory ledger:', err);
   }
+
+  // Broadcast to all windows that full catalog pull is complete
+  try {
+    BrowserWindow.getAllWindows().forEach(w => {
+      if (!w.isDestroyed()) {
+        w.webContents.send('products-updated');
+        w.webContents.send('sync-data-updated');
+      }
+    });
+  } catch (_) {}
 }
 
 // Fast employee-only pull â€” used by get-users IPC to avoid full sync latency
@@ -3085,15 +3126,15 @@ export async function processRemoteResetEvents(db: Database.Database) {
 }
 
 // Master sync function
-export async function runFullSync(db: Database.Database) {
+export async function runFullSync(db: Database.Database, forcePull: boolean = false) {
   if (isSyncing) return lastSyncResult;
   isSyncing = true;
-  syncLog('[SYNC] â–¶ Cycle started');
+  syncLog('[SYNC] ▶ Cycle started');
 
   try {
     const isOnline = await checkRemoteConnection();
     if (!isOnline) {
-      syncLog('[SYNC] âœ— Remote DB OFFLINE â€” working locally');
+      syncLog('[SYNC] ✗ Remote DB OFFLINE — working locally');
       const unsyncedCount: any = db.prepare('SELECT COUNT(*) as cnt FROM invoices WHERE synced = 0').get();
       lastSyncResult = {
         success: false,
@@ -3102,19 +3143,43 @@ export async function runFullSync(db: Database.Database) {
       };
       return lastSyncResult;
     }
-    syncLog('[NET] Remote DB connected âœ”');
+    syncLog('[NET] Remote DB connected ✔');
 
     await initRemoteTables();
     await processRemoteResetEvents(db);
     await pushUnsyncedData(db);
-    await checkAndSyncCatalogLive(db);
+
+    if (forcePull) {
+      syncLog('[SYNC] Force cloud refresh requested — pulling latest catalog...');
+      await pullLatestData(db);
+      try {
+        const pool = getRemotePool();
+        const [rows]: any = await pool.query(`
+          SELECT GREATEST(
+            COALESCE((SELECT MAX(updated_at) FROM novafreshmart_products), '1970-01-01'),
+            COALESCE((SELECT MAX(updated_at) FROM novafreshmart_categories), '1970-01-01'),
+            COALESCE((SELECT MAX(updated_at) FROM novafreshmart_brands), '1970-01-01'),
+            COALESCE((SELECT MAX(received_at) FROM novafreshmart_grn), '1970-01-01'),
+            COALESCE((SELECT MAX(updated_at) FROM novafreshmart_purchase_orders), '1970-01-01'),
+            COALESCE((SELECT MAX(deleted_at) FROM novafreshmart_deleted_records), '1970-01-01'),
+            COALESCE((SELECT MAX(created_at) FROM novafreshmart_inventory_ledger), '1970-01-01'),
+            COALESCE((SELECT GREATEST(COALESCE(value_text, '1970-01-01'), COALESCE(updated_at, '1970-01-01')) FROM novafreshmart_settings WHERE key_name = 'catalog_last_updated' LIMIT 1), '1970-01-01')
+          ) as latest_cat_ts
+        `);
+        if (rows[0]?.latest_cat_ts) {
+          lastKnownCatalogUpdate = String(rows[0].latest_cat_ts);
+        }
+      } catch (_) {}
+    } else {
+      await checkAndSyncCatalogLive(db);
+    }
 
     lastSyncTime = new Date().toLocaleTimeString();
     const unsyncedCount: any = db.prepare('SELECT COUNT(*) as cnt FROM invoices WHERE synced = 0').get();
 
     lastSyncResult = {
       success: true,
-      message: `Online â€¢ Synced at ${lastSyncTime}`,
+      message: `Online • Synced at ${lastSyncTime}`,
       pendingCount: unsyncedCount.cnt || 0
     };
 
@@ -3161,16 +3226,17 @@ export async function checkAndSyncCatalogLive(db: Database.Database) {
     if (!isOnline) return;
 
     const pool = getRemotePool();
-    // Fast lightweight check across products, categories, brands, GRN, POs, deleted records, and catalog settings
+    // Fast lightweight check across products, categories, brands, GRN, POs, deleted records, ledger, and settings
     const [rows]: any = await pool.query(`
       SELECT GREATEST(
-        COALESCE((SELECT MAX(updated_at) FROM novafreshmart_products WHERE is_active = 1), '1970-01-01'),
+        COALESCE((SELECT MAX(updated_at) FROM novafreshmart_products), '1970-01-01'),
         COALESCE((SELECT MAX(updated_at) FROM novafreshmart_categories), '1970-01-01'),
         COALESCE((SELECT MAX(updated_at) FROM novafreshmart_brands), '1970-01-01'),
         COALESCE((SELECT MAX(received_at) FROM novafreshmart_grn), '1970-01-01'),
         COALESCE((SELECT MAX(updated_at) FROM novafreshmart_purchase_orders), '1970-01-01'),
         COALESCE((SELECT MAX(deleted_at) FROM novafreshmart_deleted_records), '1970-01-01'),
-        COALESCE((SELECT value_text FROM novafreshmart_settings WHERE key_name = 'catalog_last_updated' LIMIT 1), '1970-01-01')
+        COALESCE((SELECT MAX(created_at) FROM novafreshmart_inventory_ledger), '1970-01-01'),
+        COALESCE((SELECT GREATEST(COALESCE(value_text, '1970-01-01'), COALESCE(updated_at, '1970-01-01')) FROM novafreshmart_settings WHERE key_name = 'catalog_last_updated' LIMIT 1), '1970-01-01')
       ) as latest_cat_ts
     `);
 
@@ -3178,11 +3244,11 @@ export async function checkAndSyncCatalogLive(db: Database.Database) {
     if (!latestTs) return;
 
     if (!lastKnownCatalogUpdate) {
-      lastKnownCatalogUpdate = latestTs;
       // Cold-start parity check: pull immediately so terminal has everything added while it was closed
       isLiveCatalogSyncing = true;
       syncLog('[LiveWatcher] Initial parity check on boot, pulling cloud catalog...');
       await pullLatestData(db);
+      lastKnownCatalogUpdate = latestTs;
       BrowserWindow.getAllWindows().forEach(w => {
         if (!w.isDestroyed()) {
           w.webContents.send('products-updated');
@@ -3195,9 +3261,9 @@ export async function checkAndSyncCatalogLive(db: Database.Database) {
 
     if (latestTs !== lastKnownCatalogUpdate) {
       isLiveCatalogSyncing = true;
-      lastKnownCatalogUpdate = latestTs;
-      syncLog(`[LiveWatcher] Cloud catalog change detected (${latestTs}), pulling updates...`);
+      syncLog(`[LiveWatcher] Cloud catalog change detected (${latestTs} vs ${lastKnownCatalogUpdate}), pulling updates...`);
       await pullLatestData(db);
+      lastKnownCatalogUpdate = latestTs;
       BrowserWindow.getAllWindows().forEach(w => {
         if (!w.isDestroyed()) {
           w.webContents.send('products-updated');
@@ -3213,22 +3279,22 @@ export async function checkAndSyncCatalogLive(db: Database.Database) {
   }
 }
 
-export function startAutoSync(db: Database.Database, intervalMs = 30000) {
+export function startAutoSync(db: Database.Database, intervalMs = 15000) {
   if (syncInterval) clearInterval(syncInterval);
   if (liveWatcherInterval) clearInterval(liveWatcherInterval);
 
   // Initial run immediately in background
   setTimeout(() => runFullSync(db), 100);
 
-  // Periodic master sync for sales, shifts, vouchers, etc.
+  // Periodic master sync for sales, shifts, vouchers, etc. (every 15s)
   syncInterval = setInterval(() => {
     runFullSync(db);
   }, intervalMs);
 
-  // High-frequency live catalog watcher (checks lightweight timestamp every 5 seconds)
+  // High-frequency live catalog watcher (checks lightweight timestamp every 3 seconds)
   liveWatcherInterval = setInterval(() => {
     checkAndSyncCatalogLive(db);
-  }, 5000);
+  }, 3000);
 }
 
 // Branch and Terminal Management Functions

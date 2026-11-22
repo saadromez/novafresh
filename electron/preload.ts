@@ -57,7 +57,7 @@ contextBridge.exposeInMainWorld('db', {
   deleteGRN: (id: number) => ipcRenderer.invoke('delete-grn', id),
   updatePOStatus: (data: any) => ipcRenderer.invoke('update-po-status', data),
   getSyncStatus: () => ipcRenderer.invoke('get-sync-status'),
-  triggerSync: () => ipcRenderer.invoke('trigger-sync'),
+  triggerSync: (force?: boolean) => ipcRenderer.invoke('trigger-sync', force),
   getSyncLogs: () => ipcRenderer.invoke('get-sync-logs'),
   getTerminalConfig: () => ipcRenderer.invoke('get-terminal-config'),
   setTerminalConfig: (data: any) => ipcRenderer.invoke('set-terminal-config', data),

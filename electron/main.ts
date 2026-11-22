@@ -3374,8 +3374,8 @@ ipcMain.handle('get-sync-status', async () => {
   };
 });
 
-ipcMain.handle('trigger-sync', async () => {
-  return await runFullSync(db);
+ipcMain.handle('trigger-sync', async (_, force?: boolean) => {
+  return await runFullSync(db, force !== false);
 });
 
 ipcMain.handle('get-sync-logs', () => {
@@ -4994,7 +4994,7 @@ ipcMain.handle('update-po-status', async (_, { id, status, approvedBy, rejection
 
   ipcMain.handle('get-inventory-ledger', async (_, productId) => {
     try {
-      const isOnline = await checkRemoteConnection(1500);
+      const isOnline = await checkRemoteConnection(3000);
       if (isOnline) {
         const pool = getRemotePool();
         let sql = `
@@ -5010,6 +5010,36 @@ ipcMain.handle('update-po-status', async (_, { id, status, approvedBy, rejection
         sql += ' ORDER BY il.id DESC LIMIT 150';
         const [rows]: any = await pool.query(sql, params);
         if (Array.isArray(rows) && rows.length > 0) {
+          // Cache rows into local SQLite inventory_ledger table for instant local availability
+          try {
+            const insLedger = db.prepare(`
+              INSERT OR IGNORE INTO inventory_ledger 
+                (product_id, transaction_type, reference_id, qty_change, balance_after, unit_cost, notes, created_by, created_at, synced, remote_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            `);
+            const findProd = db.prepare('SELECT id FROM products WHERE id = ? OR barcode = ? LIMIT 1');
+            db.transaction(() => {
+              for (const r of rows) {
+                const prod = findProd.get(Number(r.product_id) || 0, String(r.product_id));
+                const localProdId = prod ? prod.id : (Number(r.product_id) || r.product_id);
+                const refId = r.reference_id ? (Number(String(r.reference_id).replace(/[^0-9]/g, '')) || null) : null;
+                const createdAtStr = r.created_at ? String(r.created_at).replace('T', ' ').slice(0, 19) : getSriLankaNowString();
+                insLedger.run(
+                  localProdId,
+                  r.transaction_type,
+                  refId,
+                  Number(r.qty_change || 0),
+                  Number(r.balance_after || 0),
+                  r.unit_cost != null ? Number(r.unit_cost) : null,
+                  r.notes || null,
+                  r.created_by || 'System',
+                  createdAtStr,
+                  String(r.id)
+                );
+              }
+            })();
+          } catch (_) {}
+
           return rows.map((r: any) => ({
             id: r.id,
             product_id: r.product_id,

@@ -352,7 +352,20 @@ export default function POS({ currentUser, onUserChange, onExitToBackoffice, onN
         }).catch(() => {});
       }
       // @ts-ignore
-      if (window.db?.getProducts) {
+      if (window.db?.invoke) {
+        // @ts-ignore
+        window.db.invoke('get-products-advanced').then((p: any) => {
+          if (Array.isArray(p) && p.length > 0) setProducts(p);
+        }).catch(() => {
+          // @ts-ignore
+          if (window.db?.getProducts) {
+            // @ts-ignore
+            window.db.getProducts().then((p: any) => {
+              if (Array.isArray(p) && p.length > 0) setProducts(p);
+            }).catch(() => {});
+          }
+        });
+      } else if (window.db?.getProducts) {
         // @ts-ignore
         window.db.getProducts().then((p: any) => {
           if (Array.isArray(p) && p.length > 0) setProducts(p);
@@ -396,10 +409,24 @@ export default function POS({ currentUser, onUserChange, onExitToBackoffice, onN
     if (!window.db) return;
     try {
       // @ts-ignore
-      const prods = await window.db.getProducts().catch((err: any) => {
-        console.error('getProducts failed:', err);
-        return [];
-      });
+      let prods: any[] = [];
+      // @ts-ignore
+      if (window.db?.invoke) {
+        try {
+          // @ts-ignore
+          prods = await window.db.invoke('get-products-advanced');
+        } catch (_) {}
+      }
+      if (!Array.isArray(prods) || prods.length === 0) {
+        // @ts-ignore
+        if (window.db?.getProducts) {
+          // @ts-ignore
+          prods = await window.db.getProducts().catch((err: any) => {
+            console.error('getProducts failed:', err);
+            return [];
+          });
+        }
+      }
       if (Array.isArray(prods) && prods.length > 0) {
         setProducts(prods);
       } else if (Array.isArray(prods)) {
@@ -1700,14 +1727,17 @@ export default function POS({ currentUser, onUserChange, onExitToBackoffice, onN
 
   const filteredProducts = useMemo(() => {
     const s = search.toLowerCase().trim();
+    if (s) {
+      return products.filter(p => {
+        const matchesName = (p.name || '').toLowerCase().includes(s);
+        const matchesBarcode = (p.barcode || '').toLowerCase().includes(s);
+        const matchesPlu = p.plu ? String(p.plu).toLowerCase().includes(s) : false;
+        const matchesCode = p.item_code ? String(p.item_code).toLowerCase().includes(s) : false;
+        return matchesName || matchesBarcode || matchesPlu || matchesCode;
+      });
+    }
     return products.filter(p => {
-      const matchesCategory = activeCategory === 'All' || p.category === activeCategory || p.category_name === activeCategory;
-      if (!s) return matchesCategory;
-      const matchesName = (p.name || '').toLowerCase().includes(s);
-      const matchesBarcode = (p.barcode || '').toLowerCase().includes(s);
-      const matchesPlu = p.plu ? String(p.plu).toLowerCase().includes(s) : false;
-      const matchesCode = p.item_code ? String(p.item_code).toLowerCase().includes(s) : false;
-      return matchesCategory && (matchesName || matchesBarcode || matchesPlu || matchesCode);
+      return activeCategory === 'All' || p.category === activeCategory || p.category_name === activeCategory;
     });
   }, [products, search, activeCategory]);
 

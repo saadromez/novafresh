@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react'
-import { FileText, ArrowDown, ArrowUp, AlertCircle, CheckCircle } from 'lucide-react'
+import { FileText, ArrowDown, ArrowUp, AlertCircle, CheckCircle, RefreshCw } from 'lucide-react'
 import { formatSriLankaDateTime } from '../utils/dateUtils'
 
 export default function InventoryLedgerView({ products, loadProducts, onRestock, currentUser }: any) {
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin';
   const [selectedProduct, setSelectedProduct] = useState<number | null>(null)
   const [ledger, setLedger] = useState<any[]>([])
+  const [isRefreshing, setIsRefreshing] = useState(false)
   
   const [adjType, setAdjType] = useState('ADJUSTMENT')
   const [adjQty, setAdjQty] = useState(0)
@@ -42,6 +43,17 @@ export default function InventoryLedgerView({ products, loadProducts, onRestock,
     // @ts-ignore
     const data = await window.ipcRenderer.invoke('get-inventory-ledger', selectedProduct)
     setLedger(data || [])
+  }
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true)
+    try {
+      // @ts-ignore
+      await window.ipcRenderer.invoke('trigger-sync', true)
+      await loadLedger()
+      if (typeof loadProducts === 'function') await loadProducts()
+    } catch (_) {}
+    setIsRefreshing(false)
   }
 
   const handleAdjustment = async (e: React.FormEvent) => {
@@ -83,10 +95,21 @@ export default function InventoryLedgerView({ products, loadProducts, onRestock,
           <h2 className="text-xl font-bold text-brand-dark">Inventory Ledger & Restock</h2>
           <p className="text-sm text-gray-500">Track all movements, process direct restocks, and update pricing.</p>
         </div>
-        <button onClick={onRestock} className="bg-emerald-600 text-white px-6 py-2.5 rounded-xl font-bold hover:bg-emerald-700 shadow-lg shadow-emerald-600/30 flex items-center transition-all hover:-translate-y-0.5">
-          <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" /></svg>
-          Direct Restock (GRN)
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            title="Force pull latest ledger and catalog from cloud"
+            className="flex items-center gap-1.5 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 disabled:opacity-60 font-bold text-xs rounded-xl transition-all cursor-pointer border border-slate-200"
+          >
+            <RefreshCw size={14} className={isRefreshing ? 'animate-spin text-emerald-600' : ''} />
+            <span>{isRefreshing ? 'Refreshing...' : 'Force Cloud Refresh'}</span>
+          </button>
+          <button onClick={onRestock} className="bg-emerald-600 text-white px-6 py-2.5 rounded-xl font-bold hover:bg-emerald-700 shadow-lg shadow-emerald-600/30 flex items-center transition-all hover:-translate-y-0.5 cursor-pointer">
+            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" /></svg>
+            Direct Restock (GRN)
+          </button>
+        </div>
       </div>
 
       <div className="flex space-x-6 flex-1 min-h-0">
