@@ -22,7 +22,7 @@ const parseSqliteUtc = (dStr: any): Date => {
 
 export default function DaySaleView({ session, invoices = [], loadSession, loadInvoices, currentUser, initialTab = 'current' }: any) {
   const role = (currentUser?.role || '').toLowerCase();
-  const isAdmin = role === 'admin' || role === 'manager';
+  const isAdmin = role === 'admin' || role === 'manager' || role === 'supervisor';
   const [activeSession, setActiveSession] = useState<any>(session);
   const [openingCash, setOpeningCash] = useState('');
   const [closingCash, setClosingCash] = useState('');
@@ -113,6 +113,12 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
       setActiveSession(null);
     }
   };
+
+  useEffect(() => {
+    if (loadInvoices) loadInvoices();
+    if (loadSession) loadSession();
+    refreshActiveSession();
+  }, []);
 
   useEffect(() => {
     // @ts-ignore
@@ -265,7 +271,7 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
   // Helper to calculate statistics for any session
   const calculateSessionStats = (s: any, invList: any[] = [], txList: any[] = []) => {
     const openCash = Number(s?.opening_cash || 0);
-    const actualCash = Number(s?.actual_cash || 0);
+    const actualCash = Number(s?.actual_cash != null ? s.actual_cash : (s?.closing_cash != null ? s.closing_cash : 0));
 
     let grossSales = invList.filter((i: any) => Number(i.total || i.total_amount) > 0).reduce((a, b) => a + Number(b.total || b.total_amount), 0);
     let totalRefunds = Math.abs(invList.filter((i: any) => Number(i.total || i.total_amount) < 0).reduce((a, b) => a + Number(b.total || b.total_amount), 0));
@@ -389,15 +395,21 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
   };
 
   // Current session stats
-  const todaySales = activeSession ? invoices.filter((i: any) => i.session_id === activeSession.id) : [];
+  const todaySales = activeSession ? invoices.filter((i: any) => {
+    const sId = String(activeSession.id || '').trim();
+    const numMatch = sId.match(/(\d+)$/);
+    const numId = numMatch ? Number(numMatch[1]) : Number(sId);
+    return i.session_id === activeSession.id || i.session_id === numId || String(i.session_id) === sId;
+  }) : [];
   const currentStats = calculateSessionStats(activeSession, todaySales, transactions);
 
   // Print Day End / Z-Report via Agent (with HTML fallback)
-  const printDayEndReport = async (s: any, invList: any[] = [], txList: any[] = []) => {
-    const stats = calculateSessionStats(s, invList, txList);
+  const printDayEndReport = async (s: any, invList: any[] = [], txList: any[] = [], precomputedStats?: any) => {
+    const stats = precomputedStats || calculateSessionStats(s, invList, txList);
     const openedStr = formatSriLankaDateTime(s.opened_at);
     const closedStr = s.closed_at ? formatSriLankaDateTime(s.closed_at) : 'Currently Active';
     const diffText = stats.diff === 0 ? 'Balanced' : stats.diff < 0 ? `Shortage: -Rs. ${Math.abs(stats.diff).toFixed(2)}` : `Excess: +Rs. ${stats.diff.toFixed(2)}`;
+    const billsCount = invList.length > 0 ? invList.length : (s?.bills_count || 0);
 
     // Prepare payload for C# Print Agent
     const payload = isAdmin ? {
@@ -420,8 +432,8 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
       saleType: 'sale',
       items: [
         { name: 'Opening Cash Float', qty: 1, price: stats.openingCash, lineTotal: stats.openingCash },
-        { name: `Cash Sales (${invList.filter((i: any) => (i.payment_method || '').toUpperCase() === 'CASH').length} bills)`, qty: 1, price: stats.cashSales, lineTotal: stats.cashSales },
-        { name: `Card Sales (${invList.filter((i: any) => (i.payment_method || '').toUpperCase() === 'CARD').length} bills)`, qty: 1, price: stats.cardSales, lineTotal: stats.cardSales },
+        { name: `Cash Sales (${invList.length > 0 ? invList.filter((i: any) => (i.payment_method || '').toUpperCase() === 'CASH').length : (s?.bills_count || '')} bills)`, qty: 1, price: stats.cashSales, lineTotal: stats.cashSales },
+        { name: `Card Sales (${invList.length > 0 ? invList.filter((i: any) => (i.payment_method || '').toUpperCase() === 'CARD').length : ''} bills)`, qty: 1, price: stats.cardSales, lineTotal: stats.cardSales },
         ...(stats.bankSales > 0 ? [{ name: `Bank / QR Sales (${invList.filter((i: any) => (i.payment_method || '').toUpperCase().includes('BANK') || (i.payment_method || '').toUpperCase().includes('QR')).length} bills)`, qty: 1, price: stats.bankSales, lineTotal: stats.bankSales }] : []),
         ...(stats.splitSalesTotal > 0 ? [{ name: `Split Tender Bills (${stats.splitCount} bills)`, qty: 1, price: stats.splitSalesTotal, lineTotal: stats.splitSalesTotal }] : []),
         ...(stats.creditSales > 0 ? [{ name: 'Credit Sales', qty: 1, price: stats.creditSales, lineTotal: stats.creditSales }] : []),
@@ -450,7 +462,7 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
       change: 0,
       balance: 0,
       headerText: '*** CASHIER SHIFT CLOSE (BLIND COUNT) ***',
-      footerText: `Counted Physical Drawer Cash: Rs. ${stats.actualCash.toFixed(2)}\nTotal Bills Processed: ${invList.length}\n\nNotice: Blind count submitted for management audit and reconciliation.\n\nCashier Sign: __________________\nManager Sign: __________________`,
+      footerText: `Counted Physical Drawer Cash: Rs. ${stats.actualCash.toFixed(2)}\nTotal Bills Processed: ${billsCount}\n\nNotice: Blind count submitted for management audit and reconciliation.\n\nCashier Sign: __________________\nManager Sign: __________________`,
       saleType: 'sale',
       items: [
         { name: 'Physical Cash Counted', qty: 1, price: stats.actualCash, lineTotal: stats.actualCash }
@@ -502,7 +514,7 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
       <div class="row bold" style="font-size: 14px;"><span>Actual Cash:</span><span>Rs. ${stats.actualCash.toFixed(2)}</span></div>
       <div class="row bold"><span>Difference:</span><span>${stats.diff >= 0 ? '+' : ''}Rs. ${stats.diff.toFixed(2)} (${diffText})</span></div>
       <div class="dash"></div>
-      <div class="center" style="margin-top: 15px;"><p>Transactions: ${invList.length} | Items Sold: ${stats.productSummary.reduce((acc, p) => acc + p.qty, 0)}</p></div>
+      <div class="center" style="margin-top: 15px;"><p>Transactions: ${billsCount} | Items Sold: ${stats.productSummary.reduce((acc, p) => acc + p.qty, 0)}</p></div>
       <div style="margin-top: 30px;">
         <p>Cashier Signature: ____________________</p>
         <br/>
@@ -530,7 +542,7 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
       </div>
       <div class="dash"></div>
       <div class="row bold" style="font-size: 14px;"><span>Counted Physical Cash:</span><span>Rs. ${stats.actualCash.toFixed(2)}</span></div>
-      <div class="row"><span>Total Bills Processed:</span><span>${invList.length}</span></div>
+      <div class="row"><span>Total Bills Processed:</span><span>${billsCount}</span></div>
       <div class="dash"></div>
       <p style="font-size: 10px; color: #555; text-align: center; margin-top: 10px;">Notice: Blind count submitted for management audit and reconciliation.</p>
       <div style="margin-top: 30px;">
@@ -558,8 +570,16 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
       return;
     }
 
+    const sessionToClose = {
+      ...activeSession,
+      actual_cash: cashVal,
+      closing_cash: cashVal
+    };
+
+    const statsToPrint = calculateSessionStats(sessionToClose, todaySales, transactions);
+
     try {
-      await printDayEndReport(activeSession, todaySales, transactions);
+      await printDayEndReport(sessionToClose, todaySales, transactions, statsToPrint);
     } catch (e) {
       console.error('Print error', e);
     }
@@ -568,14 +588,14 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
       // @ts-ignore
       await window.db.closeSession({
         sessionId: activeSession.id,
-        expectedCash: currentStats.expectedTill,
+        expectedCash: statsToPrint.expectedTill,
         actualCash: cashVal,
-        totalSales: currentStats.netSales,
-        cashSales: currentStats.cashSales,
-        cardSales: currentStats.cardSales,
-        otherSales: currentStats.bankSales + currentStats.creditSales,
-        cashIn: currentStats.cashIn,
-        cashOut: currentStats.cashOut
+        totalSales: statsToPrint.netSales,
+        cashSales: statsToPrint.cashSales,
+        cardSales: statsToPrint.cardSales,
+        otherSales: statsToPrint.bankSales + statsToPrint.creditSales,
+        cashIn: statsToPrint.cashIn,
+        cashOut: statsToPrint.cashOut
       });
       const closedId = activeSession.id;
       setActiveSession(null);
@@ -612,7 +632,8 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
       const details = await window.db.invoke('get-session-details', s.id);
       const invList = details?.invoices || [];
       const txList = details?.transactions || [];
-      await printDayEndReport(s, invList, txList);
+      const sess = details?.session ? { ...s, ...details.session } : s;
+      await printDayEndReport(sess, invList, txList);
     } catch (e: any) {
       alert('Failed to reprint: ' + e.message);
     } finally {

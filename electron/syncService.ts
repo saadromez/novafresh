@@ -1995,7 +1995,7 @@ export async function pullLatestData(db: Database.Database) {
       ORDER BY opened_at DESC LIMIT 50
     `);
     if (Array.isArray(remoteShifts) && remoteShifts.length > 0) {
-      const findShift = db.prepare('SELECT id, terminal_id, status FROM sessions WHERE remote_id = ? OR (terminal_id = ? AND remote_id IS NULL AND opened_at = ?)');
+      const findShift = db.prepare('SELECT id, terminal_id, status FROM sessions WHERE remote_id = ? OR id = ? OR (terminal_id = ? AND remote_id IS NULL AND opened_at = ?)');
       const insertShift = db.prepare(`
         INSERT INTO sessions (
           remote_id, branch_id, terminal_id, username, opened_at, closed_at,
@@ -2044,11 +2044,16 @@ export async function pullLatestData(db: Database.Database) {
             }
           }
 
-          const openedAtStr = s.opened_at ? new Date(s.opened_at).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' ');
-          const closedAtStr = s.closed_at ? new Date(s.closed_at).toISOString().slice(0, 19).replace('T', ' ') : null;
+          const numMatch = String(s.id).match(/(\d+)$/);
+          const numId = numMatch ? Number(numMatch[1]) : null;
+          const openedAtStr = typeof s.opened_at === 'string' ? s.opened_at.replace('T', ' ').slice(0, 19) : (s.opened_at ? new Date(s.opened_at).toISOString().slice(0, 19).replace('T', ' ') : '');
+          const closedAtStr = s.closed_at ? (typeof s.closed_at === 'string' ? s.closed_at.replace('T', ' ').slice(0, 19) : new Date(s.closed_at).toISOString().slice(0, 19).replace('T', ' ')) : null;
 
-          const existing: any = findShift.get(s.id, s.terminal_id, openedAtStr);
+          const existing: any = findShift.get(s.id, numId, s.terminal_id, openedAtStr);
           if (existing) {
+            try {
+              db.prepare('UPDATE sessions SET remote_id = ? WHERE id = ? AND (remote_id IS NULL OR remote_id != ?)').run(s.id, existing.id, s.id);
+            } catch (_) {}
             if (s.terminal_id === config.current_terminal_id && (existing.status || '').toUpperCase() === 'OPEN') {
               if (s.closed_at || (s.status || '').toLowerCase() === 'closed') {
                 // Remote shift was officially closed, so close it locally as well
@@ -2064,7 +2069,7 @@ export async function pullLatestData(db: Database.Database) {
               closedAtStr,
               Number(s.opening_cash || 0),
               Number(s.expected_cash || 0),
-              Number(s.closing_cash || 0),
+              Number(s.closing_cash != null ? s.closing_cash : (s.actual_cash || 0)),
               Number(s.total_sales || 0),
               Number(s.cash_sales || 0),
               Number(s.card_sales || 0),
@@ -2084,7 +2089,7 @@ export async function pullLatestData(db: Database.Database) {
               closedAtStr,
               Number(s.opening_cash || 0),
               Number(s.expected_cash || 0),
-              Number(s.closing_cash || 0),
+              Number(s.closing_cash != null ? s.closing_cash : (s.actual_cash || 0)),
               Number(s.total_sales || 0),
               Number(s.cash_sales || 0),
               Number(s.card_sales || 0),

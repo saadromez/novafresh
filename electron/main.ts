@@ -2559,7 +2559,7 @@ ipcMain.handle('close-session', async (_, { sessionId, actualCash, expectedCash,
   const actual = Number(actualCash || 0);
   const expected = Number(expectedCash || 0);
   const discrepancy = actual - expected;
-  const config = getTerminalConfig(db);
+  const branchId = config.current_branch_id || 'BR-MAIN';
   const terminalId = config.current_terminal_id || 'TERM-01';
   const closedAt = getSriLankaNowString();
 
@@ -2597,12 +2597,13 @@ ipcMain.handle('close-session', async (_, { sessionId, actualCash, expectedCash,
             closing_cash = ?, expected_cash = ?, cash_sales = ?,
             card_sales = ?, other_sales = ?, total_sales = ?,
             cash_in = ?, cash_out = ?, discrepancy = ?
-        WHERE terminal_id = ? AND (status = 'open' OR status = 'OPEN')
+        WHERE id = ? OR id = ? OR (terminal_id = ? AND (status = 'open' OR status = 'OPEN'))
       `, [
         closedAt,
         actual, expected, Number(cashSales || 0),
         Number(cardSales || 0), Number(otherSales || 0), Number(totalSales || 0),
         Number(cashIn || 0), Number(cashOut || 0), discrepancy,
+        sessionId, `SH-${branchId}-${terminalId}-${sessionId}`,
         terminalId
       ]);
     }
@@ -2647,7 +2648,11 @@ ipcMain.handle('force-reset-terminal-session', async (_, customTerminalId) => {
 });
 
 ipcMain.handle('get-session-details', async (_, sessionId) => {
-  let session: any = db.prepare('SELECT * FROM sessions WHERE id = ? OR remote_id = ?').get(sessionId, sessionId);
+  const rawId = String(sessionId || '').trim();
+  const numericMatch = rawId.match(/(\d+)$/);
+  const numericId = numericMatch ? Number(numericMatch[1]) : (isNaN(Number(rawId)) ? null : Number(rawId));
+
+  let session: any = db.prepare('SELECT * FROM sessions WHERE id = ? OR remote_id = ? OR id = ?').get(sessionId, sessionId, numericId);
   let transactions: any[] = [];
   let invoices: any[] = [];
 
@@ -2656,10 +2661,11 @@ ipcMain.handle('get-session-details', async (_, sessionId) => {
     transactions = db.prepare(`
       SELECT * FROM session_transactions 
       WHERE session_id = ? OR shift_id = ? OR (shift_id IS NOT NULL AND session_id = ?)
+         OR session_id = ?
          OR (terminal_id = ? AND created_at >= ? AND (created_at <= ? OR ? IS NULL))
       ORDER BY created_at ASC, id ASC
-    `).all(session.id, shiftId, sessionId, session.terminal_id, session.opened_at, session.closed_at, session.closed_at);
-    invoices = db.prepare('SELECT * FROM invoices WHERE session_id = ? ORDER BY id ASC').all(session.id);
+    `).all(session.id, shiftId, sessionId, numericId, session.terminal_id, session.opened_at, session.closed_at, session.closed_at);
+    invoices = db.prepare('SELECT * FROM invoices WHERE session_id = ? OR session_id = ? ORDER BY id ASC').all(session.id, numericId || session.id);
 
     // If no direct session_id match (e.g. from cloud pull or legacy records), look up by shift time window & terminal
     if (invoices.length === 0 && session.opened_at) {
@@ -2692,8 +2698,8 @@ ipcMain.handle('get-session-details', async (_, sessionId) => {
         const pool = getRemotePool();
         if (!session) {
           const [remoteShifts]: any = await pool.query(
-            "SELECT * FROM novafreshmart_terminal_shifts WHERE id = ? OR id LIKE ? LIMIT 1",
-            [sessionId, `%-${sessionId}`]
+            "SELECT * FROM novafreshmart_terminal_shifts WHERE id = ? OR id LIKE ? OR id = ? LIMIT 1",
+            [sessionId, `%-${sessionId}`, `SH-%-${numericId}`]
           );
           if (Array.isArray(remoteShifts) && remoteShifts.length > 0) {
             session = remoteShifts[0];
@@ -2703,16 +2709,17 @@ ipcMain.handle('get-session-details', async (_, sessionId) => {
         if (session) {
           session = {
             ...session,
-            actual_cash: session.actual_cash != null ? Number(session.actual_cash) : (session.closing_cash != null ? Number(session.closing_cash) : null),
-            closing_cash: session.closing_cash != null ? Number(session.closing_cash) : (session.actual_cash != null ? Number(session.actual_cash) : null)
+            actual_cash: session.actual_cash != null ? Number(session.actual_cash) : (session.closing_cash != null ? Number(session.closing_cash) : 0),
+            closing_cash: session.closing_cash != null ? Number(session.closing_cash) : (session.actual_cash != null ? Number(session.actual_cash) : 0)
           };
         }
 
         if (session && invoices.length === 0) {
           const shiftId = session.remote_id || session.id;
+          const numIdStr = numericId ? String(numericId) : (String(shiftId).match(/(\d+)$/)?.[1] || String(shiftId));
           const [remoteSales]: any = await pool.query(
-            "SELECT * FROM novafreshmart_sales WHERE shift_id = ? OR (terminal_id = ? AND created_at >= ? AND (created_at <= ? OR ? IS NULL)) ORDER BY created_at ASC",
-            [shiftId, session.terminal_id, session.opened_at, session.closed_at, session.closed_at]
+            "SELECT * FROM novafreshmart_sales WHERE shift_id = ? OR shift_id = ? OR (terminal_id = ? AND created_at >= ? AND (created_at <= ? OR ? IS NULL)) ORDER BY created_at ASC",
+            [shiftId, numIdStr, session.terminal_id, session.opened_at, session.closed_at, session.closed_at]
           );
           if (Array.isArray(remoteSales) && remoteSales.length > 0) {
             invoices = remoteSales.map((s: any) => ({
@@ -2739,9 +2746,10 @@ ipcMain.handle('get-session-details', async (_, sessionId) => {
 
         if (session && transactions.length === 0) {
           const shiftId = session.remote_id || session.id;
+          const numIdStr = numericId ? String(numericId) : (String(shiftId).match(/(\d+)$/)?.[1] || String(shiftId));
           const [remoteTxs]: any = await pool.query(
-            "SELECT * FROM novafreshmart_session_transactions WHERE shift_id = ? OR shift_id LIKE ? OR session_id = ? OR (terminal_id = ? AND created_at >= ? AND (created_at <= ? OR ? IS NULL)) ORDER BY created_at ASC",
-            [shiftId, `%-${sessionId}`, sessionId, session.terminal_id, session.opened_at, session.closed_at, session.closed_at]
+            "SELECT * FROM novafreshmart_session_transactions WHERE shift_id = ? OR shift_id = ? OR shift_id LIKE ? OR session_id = ? OR (terminal_id = ? AND created_at >= ? AND (created_at <= ? OR ? IS NULL)) ORDER BY created_at ASC",
+            [shiftId, numIdStr, `%-${sessionId}`, numIdStr, session.terminal_id, session.opened_at, session.closed_at, session.closed_at]
           );
           if (Array.isArray(remoteTxs) && remoteTxs.length > 0) {
             transactions = remoteTxs.map((t: any) => ({
