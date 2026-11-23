@@ -38,6 +38,10 @@ let db = new Database(dbPath, { verbose: console.log })
 import { initLocalSchema, startAutoSync, runFullSync, getTerminalConfig, setTerminalConfig, createBranch, createTerminal, updateTerminal, deleteTerminal, getBackofficeOverview, logTerminalActivity, pushUnsyncedData, pullLatestData, pullEmployeesOnly, getRecentSyncLogs } from './syncService'
 import { getRemoteStatus, getRemotePool, checkRemoteConnection } from './remoteDb'
 import { getSriLankaNowString, toSriLankaYMD } from './dateUtils'
+import { initErrorLogger, recordAppError, getAppErrorLogs, clearAppErrorLogs, getLogFilePath, verifyDevPassword } from './errorLogger'
+
+// Initialize error logger immediately to capture any startup or runtime errors
+initErrorLogger()
 
 // Initialize offline-first tables & auto-sync
 initLocalSchema(db)
@@ -1989,8 +1993,23 @@ ipcMain.handle('get-categories', async () => {
       }
     }
 
-    const res = db.prepare('UPDATE products SET name = ?, price = ?, cost_price = ?, barcode = ?, item_code = ?, low_stock_alert = ?, category_id = ?, brand_id = ?, supplier_id = ?, has_variants = ?, requires_batch = ?, image_data = ?, size = ?, color = ?, expiry_date = ?, branch_id = ?, wholesale_price = ?, unit = ?, is_scale_item = ?, plu = ?, allow_price_override = ?, synced = 0 WHERE id = ?')
-      .run(product.name, product.price, product.cost_price, product.barcode || null, product.item_code || null, lowStockAlert, safeCategoryId, product.brand_id || null, product.supplier_id || null, product.has_variants ? 1 : 0, product.requires_batch ? 1 : 0, product.image_data || null, product.size || null, product.color || null, product.expiry_date || null, product.branch_id || 'ALL', product.wholesale_price || 0, safeUnit, product.is_scale_item ? 1 : 0, product.plu || null, allowOverride, product.id);
+    const existingProduct: any = db.prepare('SELECT stock FROM products WHERE id = ?').get(product.id);
+    const oldStock = Number(existingProduct?.stock || 0);
+    const newStock = (product.stock !== undefined && product.stock !== null && product.stock !== '') ? Number(product.stock) : oldStock;
+    const stockDiff = newStock - oldStock;
+
+    const res = db.prepare('UPDATE products SET name = ?, price = ?, cost_price = ?, stock = ?, barcode = ?, item_code = ?, low_stock_alert = ?, category_id = ?, brand_id = ?, supplier_id = ?, has_variants = ?, requires_batch = ?, image_data = ?, size = ?, color = ?, expiry_date = ?, branch_id = ?, wholesale_price = ?, unit = ?, is_scale_item = ?, plu = ?, allow_price_override = ?, synced = 0 WHERE id = ?')
+      .run(product.name, product.price, product.cost_price, newStock, product.barcode || null, product.item_code || null, lowStockAlert, safeCategoryId, product.brand_id || null, product.supplier_id || null, product.has_variants ? 1 : 0, product.requires_batch ? 1 : 0, product.image_data || null, product.size || null, product.color || null, product.expiry_date || null, product.branch_id || 'ALL', product.wholesale_price || 0, safeUnit, product.is_scale_item ? 1 : 0, product.plu || null, allowOverride, product.id);
+
+    const nowSriLanka = getSriLankaNowString();
+    if (Math.abs(stockDiff) > 0.0001) {
+      try {
+        db.prepare('INSERT INTO inventory_ledger (product_id, transaction_type, qty_change, balance_after, notes, created_by, created_at, synced) VALUES (?, ?, ?, ?, ?, ?, ?, 0)')
+          .run(product.id, 'ADJUSTMENT', stockDiff, newStock, 'Manual Product Edit Stock Adjustment', 'Admin', nowSriLanka);
+      } catch (ledgerErr) {
+        console.warn('[update-product] Local ledger insert warning:', ledgerErr);
+      }
+    }
 
     try {
       const isOnline = await checkRemoteConnection(2000);
@@ -2008,6 +2027,7 @@ ipcMain.handle('get-categories', async () => {
             price = VALUES(price),
             wholesale_price = VALUES(wholesale_price),
             cost_price = VALUES(cost_price),
+            stock = VALUES(stock),
             unit = VALUES(unit),
             is_scale_item = VALUES(is_scale_item),
             plu = VALUES(plu),
@@ -2025,13 +2045,21 @@ ipcMain.handle('get-categories', async () => {
           product.price,
           product.wholesale_price || 0,
           product.cost_price || 0,
-          product.stock || 0,
+          newStock,
           safeUnit,
           product.is_scale_item ? 1 : 0,
           product.plu || null,
           allowOverride,
           product.expiry_date || null
         ]);
+
+        if (Math.abs(stockDiff) > 0.0001) {
+          await pool.query(`
+            INSERT INTO novafreshmart_inventory_ledger (product_id, transaction_type, qty_change, balance_after, notes, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, NOW())
+          `, [String(product.id), 'ADJUSTMENT', stockDiff, newStock, 'Manual Product Edit Stock Adjustment', 'Admin']).catch(() => {});
+        }
+
         // Only mark synced=1 AFTER confirmed remote write
         db.prepare('UPDATE products SET synced = 1 WHERE id = ?').run(product.id);
         await pool.query("INSERT INTO novafreshmart_settings (key_name, value_text, updated_at) VALUES ('catalog_last_updated', NOW(), NOW()) ON DUPLICATE KEY UPDATE value_text = NOW(), updated_at = NOW()").catch(() => {});
@@ -2556,70 +2584,78 @@ ipcMain.handle('open-session', async (_, payload) => {
 });
 
 ipcMain.handle('close-session', async (_, { sessionId, actualCash, expectedCash, totalSales, cashSales, cardSales, otherSales, totalRefunds, cashIn, cashOut }: any = {}) => {
-  const actual = Number(actualCash || 0);
-  const expected = Number(expectedCash || 0);
-  const discrepancy = actual - expected;
-  const branchId = config.current_branch_id || 'BR-MAIN';
-  const terminalId = config.current_terminal_id || 'TERM-01';
-  const closedAt = getSriLankaNowString();
-
-  const stmt = db.prepare(`
-    UPDATE sessions 
-    SET status = 'CLOSED', closed_at = ?, actual_cash = ?, expected_cash = ?,
-        total_sales = ?, cash_sales = ?, card_sales = ?, other_sales = ?,
-        total_refunds = ?, cash_in = ?, cash_out = ?, discrepancy = ?, synced = 0
-    WHERE id = ? OR (terminal_id = ? AND (status = 'OPEN' OR status = 'open'))
-  `);
-  const res = stmt.run(
-    closedAt,
-    actual,
-    expected,
-    Number(totalSales || 0),
-    Number(cashSales || 0),
-    Number(cardSales || 0),
-    Number(otherSales || 0),
-    Number(totalRefunds || 0),
-    Number(cashIn || 0),
-    Number(cashOut || 0),
-    discrepancy,
-    sessionId,
-    terminalId
-  );
-
-  // Immediately close this terminal's open shifts in remote MariaDB as well
   try {
-    const isOnline = await checkRemoteConnection();
-    if (isOnline) {
-      const pool = getRemotePool();
-      await pool.query(`
-        UPDATE novafreshmart_terminal_shifts
-        SET status = 'closed', closed_at = ?,
-            closing_cash = ?, expected_cash = ?, cash_sales = ?,
-            card_sales = ?, other_sales = ?, total_sales = ?,
-            cash_in = ?, cash_out = ?, discrepancy = ?
-        WHERE id = ? OR id = ? OR (terminal_id = ? AND (status = 'open' OR status = 'OPEN'))
-      `, [
-        closedAt,
-        actual, expected, Number(cashSales || 0),
-        Number(cardSales || 0), Number(otherSales || 0), Number(totalSales || 0),
-        Number(cashIn || 0), Number(cashOut || 0), discrepancy,
-        sessionId, `SH-${branchId}-${terminalId}-${sessionId}`,
-        terminalId
-      ]);
-    }
-  } catch (err) {
-    console.warn('[close-session] Could not update remote shift immediately:', err);
-  }
+    const config = getTerminalConfig(db);
+    const actual = Number(actualCash || 0);
+    const expected = Number(expectedCash || 0);
+    const discrepancy = actual - expected;
+    const branchId = config.current_branch_id || 'BR-MAIN';
+    const terminalId = config.current_terminal_id || 'TERM-01';
+    const closedAt = getSriLankaNowString();
 
-  setTimeout(() => runFullSync(db), 500);
-  setTimeout(async () => {
+    const stmt = db.prepare(`
+      UPDATE sessions 
+      SET status = 'CLOSED', closed_at = ?, actual_cash = ?, expected_cash = ?,
+          total_sales = ?, cash_sales = ?, card_sales = ?, other_sales = ?,
+          total_refunds = ?, cash_in = ?, cash_out = ?, discrepancy = ?, synced = 0
+      WHERE id = ? OR (terminal_id = ? AND (status = 'OPEN' OR status = 'open'))
+    `);
+    const res = stmt.run(
+      closedAt,
+      actual,
+      expected,
+      Number(totalSales || 0),
+      Number(cashSales || 0),
+      Number(cardSales || 0),
+      Number(otherSales || 0),
+      Number(totalRefunds || 0),
+      Number(cashIn || 0),
+      Number(cashOut || 0),
+      discrepancy,
+      sessionId,
+      terminalId
+    );
+
+    // Immediately close this terminal's open shifts in remote MariaDB as well
     try {
-      await performLocalSnapshot({ label: 'ShiftEnd_Auto', notes: 'Automated shift-end snapshot' });
-    } catch(e) {
-      console.warn('Shift end auto-backup error:', e);
+      const isOnline = await checkRemoteConnection();
+      if (isOnline) {
+        const pool = getRemotePool();
+        await pool.query(`
+          UPDATE novafreshmart_terminal_shifts
+          SET status = 'closed', closed_at = ?,
+              closing_cash = ?, expected_cash = ?, cash_sales = ?,
+              card_sales = ?, other_sales = ?, total_sales = ?,
+              cash_in = ?, cash_out = ?, discrepancy = ?
+          WHERE id = ? OR id = ? OR (terminal_id = ? AND (status = 'open' OR status = 'OPEN'))
+        `, [
+          closedAt,
+          actual, expected, Number(cashSales || 0),
+          Number(cardSales || 0), Number(otherSales || 0), Number(totalSales || 0),
+          Number(cashIn || 0), Number(cashOut || 0), discrepancy,
+          sessionId, `SH-${branchId}-${terminalId}-${sessionId}`,
+          terminalId
+        ]);
+      }
+    } catch (err: any) {
+      console.warn('[close-session] Could not update remote shift immediately:', err);
+      recordAppError('close-session-remote', err?.message || String(err), err?.stack);
     }
-  }, 1500);
-  return { success: true, sessionId };
+
+    setTimeout(() => runFullSync(db), 500);
+    setTimeout(async () => {
+      try {
+        await performLocalSnapshot({ label: 'ShiftEnd_Auto', notes: 'Automated shift-end snapshot' });
+      } catch(e: any) {
+        console.warn('Shift end auto-backup error:', e);
+      }
+    }, 1500);
+    return { success: true, sessionId };
+  } catch (closeErr: any) {
+    console.error('[close-session] Fatal close-session error:', closeErr);
+    recordAppError('close-session', closeErr?.message || String(closeErr), closeErr?.stack);
+    throw closeErr;
+  }
 });
 
 ipcMain.handle('force-reset-terminal-session', async (_, customTerminalId) => {
@@ -3388,6 +3424,38 @@ ipcMain.handle('trigger-sync', async (_, force?: boolean) => {
 
 ipcMain.handle('get-sync-logs', () => {
   return getRecentSyncLogs();
+});
+
+ipcMain.handle('verify-dev-password', (_, password: string) => {
+  return { success: verifyDevPassword(password) };
+});
+
+ipcMain.handle('get-error-logs', (_, password?: string) => {
+  if (password && !verifyDevPassword(password)) {
+    return { success: false, error: 'Unauthorized', logs: [] };
+  }
+  return {
+    success: true,
+    logs: getAppErrorLogs(),
+    filePath: getLogFilePath()
+  };
+});
+
+ipcMain.handle('clear-error-logs', (_, password: string) => {
+  if (!verifyDevPassword(password)) {
+    return { success: false, error: 'Unauthorized' };
+  }
+  clearAppErrorLogs();
+  return { success: true };
+});
+
+ipcMain.handle('log-renderer-error', (_, { source, message, stack }: any) => {
+  recordAppError(source || 'Renderer UI', message, stack);
+  return { success: true };
+});
+
+ipcMain.handle('get-error-log-path', () => {
+  return { filePath: getLogFilePath() };
 });
 
 ipcMain.handle('get-terminal-config', () => {

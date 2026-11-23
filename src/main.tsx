@@ -20,6 +20,30 @@ if (window.ipcRenderer && (window.ipcRenderer as any).sendSync) {
   };
 }
 
+// Global UI error reporters
+window.addEventListener('error', (event) => {
+  try {
+    // @ts-ignore
+    window.db?.invoke?.('log-renderer-error', {
+      source: 'Frontend Window',
+      message: event.message || 'Window error',
+      stack: event.error?.stack || `${event.filename}:${event.lineno}:${event.colno}`
+    });
+  } catch (_) {}
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  try {
+    const reason = event.reason;
+    // @ts-ignore
+    window.db?.invoke?.('log-renderer-error', {
+      source: 'Frontend Promise Rejection',
+      message: reason?.message || String(reason || 'Unhandled Promise Rejection'),
+      stack: reason?.stack
+    });
+  } catch (_) {}
+});
+
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: any }> {
   constructor(props: { children: React.ReactNode }) {
     super(props);
@@ -32,6 +56,14 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 
   componentDidCatch(error: any, errorInfo: any) {
     console.error('Unhandled React Error:', error, errorInfo);
+    try {
+      // @ts-ignore
+      window.db?.invoke?.('log-renderer-error', {
+        source: 'React ErrorBoundary',
+        message: error?.message || String(error),
+        stack: (error?.stack || '') + '\nComponentStack: ' + (errorInfo?.componentStack || '')
+      });
+    } catch (_) {}
   }
 
   render() {

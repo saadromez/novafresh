@@ -3,7 +3,7 @@ import {
   Settings, Save, Printer, Monitor, ShieldCheck, Database, CheckCircle, AlertCircle, 
   DoorOpen, Play, RefreshCw, Award, Coins, Trash2, AlertTriangle, RotateCcw, 
   Lock, CloudLightning, Layers, Users, Truck, Ticket, FileText, Check, X, ShieldAlert,
-  Download, ArrowDownCircle, PackageCheck
+  Download, ArrowDownCircle, PackageCheck, Copy, Terminal
 } from 'lucide-react';
 import { syncAgentPrinter, getAgentPrinters, isAgentRunning, openCashDrawerViaAgent } from '../lib/printAgent';
 
@@ -41,6 +41,17 @@ export default function SettingsView() {
   const [resetPin, setResetPin] = useState<string>('');
   const [resetReason, setResetReason] = useState<string>('');
   const [resetting, setResetting] = useState<boolean>(false);
+
+  // Developer Error Logs State (Protected by dev password)
+  const [showErrorLogsModal, setShowErrorLogsModal] = useState<boolean>(false);
+  const [devPassword, setDevPassword] = useState<string>('');
+  const [devAuthenticated, setDevAuthenticated] = useState<boolean>(false);
+  const [devPasswordError, setDevPasswordError] = useState<string>('');
+  const [errorLogsList, setErrorLogsList] = useState<any[]>([]);
+  const [loadingErrorLogs, setLoadingErrorLogs] = useState<boolean>(false);
+  const [logFilePath, setLogFilePath] = useState<string>('');
+  const [expandedErrorId, setExpandedErrorId] = useState<string | null>(null);
+  const [copiedLogs, setCopiedLogs] = useState<boolean>(false);
 
   useEffect(() => {
     loadSettings();
@@ -251,6 +262,95 @@ export default function SettingsView() {
     }
   };
 
+  const handleOpenErrorLogs = async () => {
+    setShowErrorLogsModal(true);
+    setDevPasswordError('');
+    if (devAuthenticated) {
+      await fetchErrorLogs();
+    }
+  };
+
+  const handleVerifyDevPassword = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!devPassword.trim()) {
+      setDevPasswordError('Please enter the developer password.');
+      return;
+    }
+    // @ts-ignore
+    if (window.db?.invoke) {
+      try {
+        // @ts-ignore
+        const res = await window.db.invoke('verify-dev-password', devPassword.trim());
+        if (res && res.success) {
+          setDevAuthenticated(true);
+          setDevPasswordError('');
+          await fetchErrorLogs(devPassword.trim());
+        } else {
+          setDevPasswordError('Incorrect Developer Password. Access Denied.');
+        }
+      } catch (err: any) {
+        setDevPasswordError('Verification error: ' + (err.message || String(err)));
+      }
+    }
+  };
+
+  const fetchErrorLogs = async (pwd?: string) => {
+    setLoadingErrorLogs(true);
+    try {
+      // @ts-ignore
+      if (window.db?.invoke) {
+        // @ts-ignore
+        const res = await window.db.invoke('get-error-logs', pwd || devPassword.trim());
+        if (res && res.success) {
+          setErrorLogsList(res.logs || []);
+          setLogFilePath(res.filePath || '');
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load error logs:', err);
+    } finally {
+      setLoadingErrorLogs(false);
+    }
+  };
+
+  const handleClearErrorLogs = async () => {
+    if (!window.confirm('Are you sure you want to clear all error logs?')) return;
+    try {
+      // @ts-ignore
+      await window.db.invoke('clear-error-logs', devPassword.trim());
+      setErrorLogsList([]);
+      alert('Error logs cleared.');
+    } catch (err: any) {
+      alert('Failed to clear logs: ' + err.message);
+    }
+  };
+
+  const handleCopyErrorLogs = () => {
+    if (errorLogsList.length === 0) {
+      alert('No error logs to copy.');
+      return;
+    }
+    const lines = [
+      '=================================================',
+      'LUNABEE / NOVA FRESHMART - SYSTEM ERROR LOGS',
+      `Exported: ${new Date().toLocaleString()}`,
+      `Total Entries: ${errorLogsList.length}`,
+      `Log File: ${logFilePath}`,
+      '=================================================\n'
+    ];
+    for (const item of errorLogsList) {
+      lines.push(`[${item.timestamp}] [${item.source}]`);
+      lines.push(`Error: ${item.message}`);
+      if (item.stack) {
+        lines.push(`Stack:\n${item.stack}`);
+      }
+      lines.push('-------------------------------------------------');
+    }
+    navigator.clipboard.writeText(lines.join('\n'));
+    setCopiedLogs(true);
+    setTimeout(() => setCopiedLogs(false), 3000);
+  };
+
   const handleExportBackup = async () => {
     try {
       // @ts-ignore
@@ -341,9 +441,18 @@ export default function SettingsView() {
           <h2 className="text-xl font-bold text-brand-dark">System Configuration</h2>
           <p className="text-sm text-gray-500">Manage hardware peripherals, receipt formats, and tax rules.</p>
         </div>
-        <button onClick={handleSave} className="bg-brand-primary text-white px-6 py-3 rounded-full font-bold flex items-center hover:bg-brand-secondary transition-colors shadow-sm">
-          <Save size={18} className="mr-2" /> Save Configuration
-        </button>
+        <div className="flex items-center gap-3">
+          <button 
+            type="button"
+            onClick={handleOpenErrorLogs} 
+            className="bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 px-5 py-3 rounded-full font-bold flex items-center transition-colors shadow-sm cursor-pointer"
+          >
+            <ShieldAlert size={18} className="mr-2 text-amber-600" /> Error Logs
+          </button>
+          <button onClick={handleSave} className="bg-brand-primary text-white px-6 py-3 rounded-full font-bold flex items-center hover:bg-brand-secondary transition-colors shadow-sm cursor-pointer">
+            <Save size={18} className="mr-2" /> Save Configuration
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-8">
@@ -897,6 +1006,218 @@ export default function SettingsView() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── DEVELOPER ERROR LOGS MODAL (PASSWORD PROTECTED: Lunatech@2026) ── */}
+      {showErrorLogsModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
+          {!devAuthenticated ? (
+            /* Password Authentication Screen */
+            <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95">
+              <div className="flex items-center gap-3 text-amber-600 mb-4">
+                <div className="p-3 bg-amber-100 rounded-2xl text-amber-700">
+                  <Lock size={26} />
+                </div>
+                <div>
+                  <h4 className="font-black text-lg text-slate-900">Developer Diagnostics</h4>
+                  <p className="text-xs text-slate-500">Internal Error Logs &amp; System Health</p>
+                </div>
+              </div>
+
+              <p className="text-xs text-slate-600 mb-4 leading-relaxed">
+                Access to system runtime logs is restricted. Please enter the authorized developer password to proceed.
+              </p>
+
+              <form onSubmit={handleVerifyDevPassword} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Developer Password</label>
+                  <div className="relative">
+                    <input
+                      type="password"
+                      autoFocus
+                      placeholder="Enter Dev Password"
+                      value={devPassword}
+                      onChange={(e) => {
+                        setDevPassword(e.target.value);
+                        setDevPasswordError('');
+                      }}
+                      className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-mono font-bold text-slate-900 outline-none focus:border-amber-600 focus:bg-white"
+                    />
+                    <Lock size={15} className="absolute left-3 top-3 text-slate-400" />
+                  </div>
+                </div>
+
+                {devPasswordError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 font-bold flex items-center gap-2">
+                    <AlertTriangle size={15} className="shrink-0" />
+                    <span>{devPasswordError}</span>
+                  </div>
+                )}
+
+                <div className="flex gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowErrorLogsModal(false);
+                      setDevPassword('');
+                      setDevPasswordError('');
+                    }}
+                    className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl shadow-md shadow-amber-600/30 transition-all cursor-pointer"
+                  >
+                    Unlock Logs
+                  </button>
+                </div>
+              </form>
+            </div>
+          ) : (
+            /* Authenticated Error Logs Viewer */
+            <div className="bg-white rounded-3xl max-w-4xl w-full shadow-2xl border border-slate-200 flex flex-col max-h-[85vh] animate-in fade-in zoom-in-95 overflow-hidden">
+              {/* Modal Header */}
+              <div className="p-5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-amber-100 text-amber-800 rounded-2xl">
+                    <Terminal size={22} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-black text-lg text-slate-900">System Error Logs</h3>
+                      <span className={`text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full ${
+                        errorLogsList.length > 0 ? 'bg-rose-100 text-rose-800 border border-rose-200' : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                      }`}>
+                        {errorLogsList.length} {errorLogsList.length === 1 ? 'Error' : 'Errors'} Recorded
+                      </span>
+                    </div>
+                    {logFilePath && (
+                      <p className="text-[11px] text-slate-500 font-mono truncate max-w-xl">
+                        Log File: {logFilePath}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => fetchErrorLogs()}
+                    disabled={loadingErrorLogs}
+                    className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+                    title="Refresh Logs"
+                  >
+                    <RefreshCw size={13} className={loadingErrorLogs ? 'animate-spin' : ''} />
+                    <span>Refresh</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleCopyErrorLogs}
+                    disabled={errorLogsList.length === 0}
+                    className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    title="Copy to clipboard"
+                  >
+                    {copiedLogs ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
+                    <span>{copiedLogs ? 'Copied!' : 'Copy All'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleClearErrorLogs}
+                    disabled={errorLogsList.length === 0}
+                    className="px-3 py-1.5 bg-rose-50 border border-rose-200 hover:bg-rose-100 text-rose-700 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    title="Clear Log History"
+                  >
+                    <Trash2 size={13} />
+                    <span>Clear</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowErrorLogsModal(false)}
+                    className="p-1.5 text-slate-400 hover:text-slate-700 rounded-xl hover:bg-slate-200 transition-colors cursor-pointer ml-1"
+                    title="Close"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Logs Content Area */}
+              <div className="flex-1 overflow-y-auto p-5 space-y-3 bg-slate-50/50">
+                {loadingErrorLogs ? (
+                  <div className="py-16 text-center text-slate-500">
+                    <RefreshCw size={28} className="animate-spin mx-auto mb-2 text-amber-600" />
+                    <p className="text-sm font-bold">Loading error logs...</p>
+                  </div>
+                ) : errorLogsList.length === 0 ? (
+                  <div className="py-16 text-center text-slate-500 bg-white rounded-2xl border border-slate-200">
+                    <CheckCircle size={36} className="mx-auto mb-2 text-emerald-500" />
+                    <h4 className="text-sm font-bold text-slate-800">No Errors Logged</h4>
+                    <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                      All system operations, sync services, and cashier sessions are running without recorded exceptions.
+                    </p>
+                  </div>
+                ) : (
+                  errorLogsList.map((item, idx) => {
+                    const isExpanded = expandedErrorId === (item.id || String(idx));
+                    return (
+                      <div
+                        key={item.id || idx}
+                        className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-2 hover:border-slate-300 transition-colors"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[11px] font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
+                              {item.timestamp || 'Unknown Time'}
+                            </span>
+                            <span className="font-bold text-[11px] px-2 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-200">
+                              {item.source || 'System'}
+                            </span>
+                          </div>
+                          {item.stack && (
+                            <button
+                              type="button"
+                              onClick={() => setExpandedErrorId(isExpanded ? null : (item.id || String(idx)))}
+                              className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer"
+                            >
+                              {isExpanded ? 'Hide Stack Trace' : 'View Stack Trace'}
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="p-3 bg-rose-50 border border-rose-200/80 rounded-xl text-xs font-semibold text-rose-950 break-words leading-relaxed">
+                          {item.message || 'No error message'}
+                        </div>
+
+                        {isExpanded && item.stack && (
+                          <div className="bg-slate-900 text-slate-100 font-mono text-[11px] p-3 rounded-xl overflow-x-auto whitespace-pre max-h-56 leading-tight border border-slate-800">
+                            {item.stack}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-4 border-t border-slate-200 bg-white flex justify-between items-center text-xs text-slate-500">
+                <span className="font-mono text-[11px]">Developer Mode Authorized</span>
+                <button
+                  type="button"
+                  onClick={() => setShowErrorLogsModal(false)}
+                  className="px-5 py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-xl transition-colors cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
