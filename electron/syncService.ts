@@ -667,7 +667,7 @@ export async function pushUnsyncedData(db: Database.Database) {
         sess.branch_id || branchId,
         sess.terminal_id || currentTermId,
         sess.username || 'Cashier',
-        sess.opened_at || new Date().toISOString().slice(0, 19).replace('T', ' '),
+        sess.opened_at || getSriLankaNowString(),
         sess.closed_at || null,
         Number(sess.opening_cash || 0),
         expectedCash,
@@ -755,7 +755,7 @@ export async function pushUnsyncedData(db: Database.Database) {
         h.outgoing_cashier || 'Cashier',
         h.incoming_cashier || 'Cashier',
         h.shift_started_at || null,
-        h.handover_time || new Date().toISOString().slice(0, 19).replace('T', ' '),
+        h.handover_time || getSriLankaNowString(),
         Number(h.bills_count || 0),
         Number(h.cash_sales || 0),
         Number(h.card_sales || 0),
@@ -2046,8 +2046,8 @@ export async function pullLatestData(db: Database.Database) {
 
           const numMatch = String(s.id).match(/(\d+)$/);
           const numId = numMatch ? Number(numMatch[1]) : null;
-          const openedAtStr = typeof s.opened_at === 'string' ? s.opened_at.replace('T', ' ').slice(0, 19) : (s.opened_at ? new Date(s.opened_at).toISOString().slice(0, 19).replace('T', ' ') : '');
-          const closedAtStr = s.closed_at ? (typeof s.closed_at === 'string' ? s.closed_at.replace('T', ' ').slice(0, 19) : new Date(s.closed_at).toISOString().slice(0, 19).replace('T', ' ')) : null;
+          const openedAtStr = typeof s.opened_at === 'string' ? s.opened_at.replace('T', ' ').slice(0, 19) : (s.opened_at ? getSriLankaNowString(s.opened_at) : '');
+          const closedAtStr = s.closed_at ? (typeof s.closed_at === 'string' ? s.closed_at.replace('T', ' ').slice(0, 19) : getSriLankaNowString(s.closed_at)) : null;
 
           const existing: any = findShift.get(s.id, numId, s.terminal_id, openedAtStr);
           if (existing) {

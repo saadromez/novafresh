@@ -46,14 +46,19 @@ function ActionButton({ icon, label, sub, color, onClick, disabled, active }: an
 const parseSqliteUtc = (dStr: any): Date => {
   if (!dStr) return new Date();
   if (dStr instanceof Date) return dStr;
-  let s = String(dStr).trim();
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(s) && !s.includes('Z') && !s.includes('+')) {
-    s = s.replace(' ', 'T') + 'Z';
-  } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
-    s = s + 'Z';
+  const s = String(dStr).trim();
+  const match = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const hour = Number(match[4] || 0);
+    const minute = Number(match[5] || 0);
+    const second = Number(match[6] || 0);
+    return new Date(year, month, day, hour, minute, second);
   }
   const d = new Date(s);
-  return isNaN(d.getTime()) ? new Date(dStr) : d;
+  return isNaN(d.getTime()) ? new Date() : d;
 };
 
 export default function POS({ currentUser, onUserChange, onExitToBackoffice, onNavigate, onLogout }: any) {
@@ -623,7 +628,7 @@ export default function POS({ currentUser, onUserChange, onExitToBackoffice, onN
         setShiftSummary({
           sessionId: activeSession?.id || 1,
           cashier: activeCashier?.username || 'Cashier',
-          shiftStartTime: activeSession?.opened_at || new Date().toISOString(),
+          shiftStartTime: activeSession?.opened_at || getSriLankaNowString(),
           openingFloat: activeSession?.opening_cash || 0,
           billsCount: 0,
           totalSales: 0,

@@ -48,11 +48,14 @@ export function formatSriLankaDateTime(
     } else if (typeof dateInput === 'string') {
       const trimmed = dateInput.trim();
       // If it's a standard SQLite string without timezone: "YYYY-MM-DD HH:mm:ss"
-      if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(trimmed)) {
+      if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?$/.test(trimmed)) {
         // Treat as local representation or parse explicitly
         const [datePart, timePart = '00:00:00'] = trimmed.replace('T', ' ').split(' ');
         const [year, month, day] = datePart.split('-').map(Number);
-        const [hour, min, sec = 0] = timePart.split(':').map(Number);
+        const timeParts = timePart.split(':');
+        const hour = Number(timeParts[0] || 0);
+        const min = Number(timeParts[1] || 0);
+        const sec = Math.floor(Number(timeParts[2] || 0));
         
         if (options.dateOnly) {
           return `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}/${year}`;

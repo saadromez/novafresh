@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import novaLogo from '../assets/nova-freshmart-logo.png'
+import { formatSriLankaDateTime } from '../utils/dateUtils'
 
 export default function DayEndModal({ session, invoices, products, onClose, onEndDay, isAdmin }: any) {
   const [actualCash, setActualCash] = useState(0)
@@ -80,7 +81,7 @@ export default function DayEndModal({ session, invoices, products, onClose, onEn
             <img src={novaLogo} alt="Logo" className="h-16 mx-auto mb-2 object-contain" />
             <h1 className="text-2xl font-black text-brand-dark">End of Day Report</h1>
             <p className="text-gray-500 font-medium">Session ID: #{session.id}</p>
-            <p className="text-sm text-gray-400">{new Date(session.opened_at).toLocaleString()} - {new Date().toLocaleString()}</p>
+            <p className="text-sm text-gray-400">{formatSriLankaDateTime(session.opened_at)} - {formatSriLankaDateTime(new Date())}</p>
           </div>
 
           <div className="grid grid-cols-2 gap-6">

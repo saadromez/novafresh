@@ -5,19 +5,24 @@ import {
   MapPin, Phone, Laptop, Wifi, WifiOff, Activity, Layers, Store, Trash2, Edit3,
   FileText, Search, Eye, X, ShoppingBag, CreditCard, Check, ArrowRight, ArrowLeftRight, LogOut, Calendar, Printer, Coins
 } from 'lucide-react';
-import { formatSriLankaDateTime } from '../utils/dateUtils';
+import { formatSriLankaDateTime, toSriLankaYMD } from '../utils/dateUtils';
 
 const parseSqliteUtc = (dStr: any): Date => {
   if (!dStr) return new Date();
   if (dStr instanceof Date) return dStr;
-  let s = String(dStr).trim();
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(s) && !s.includes('Z') && !s.includes('+')) {
-    s = s.replace(' ', 'T') + 'Z';
-  } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
-    s = s + 'Z';
+  const s = String(dStr).trim();
+  const match = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const hour = Number(match[4] || 0);
+    const minute = Number(match[5] || 0);
+    const second = Number(match[6] || 0);
+    return new Date(year, month, day, hour, minute, second);
   }
   const d = new Date(s);
-  return isNaN(d.getTime()) ? new Date(dStr) : d;
+  return isNaN(d.getTime()) ? new Date() : d;
 };
 
 export default function BranchTerminalBackoffice({ currentUser }: any) {
@@ -388,20 +393,22 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
   const filteredShifts = overview.shifts?.filter((s: any) => {
     if (selectedBranchFilter !== 'ALL' && s.branch_id !== selectedBranchFilter) return false;
     if (shiftDateFilter !== 'all') {
-      const openedDate = parseSqliteUtc(s.opened_at);
-      const openedDateStr = openedDate.toISOString().split('T')[0];
-      const now = new Date();
-      const todayStr = now.toISOString().split('T')[0];
+      const openedDateStr = String(s.opened_at || '').slice(0, 10);
+      const todayStr = toSriLankaYMD();
       if (shiftDateFilter === 'today') {
         if (openedDateStr !== todayStr) return false;
       } else if (shiftDateFilter === 'yesterday') {
-        const y = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        const yDate = new Date();
+        yDate.setDate(yDate.getDate() - 1);
+        const y = toSriLankaYMD(yDate);
         if (openedDateStr !== y) return false;
       } else if (shiftDateFilter === 'week') {
-        const w = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        const wDate = new Date();
+        wDate.setDate(wDate.getDate() - 7);
+        const w = toSriLankaYMD(wDate);
         if (openedDateStr < w || openedDateStr > todayStr) return false;
       } else if (shiftDateFilter === 'month') {
-        const m = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+        const m = `${todayStr.slice(0, 7)}-01`;
         if (openedDateStr < m || openedDateStr > todayStr) return false;
       } else if (shiftDateFilter === 'custom') {
         if (shiftCustomStart && openedDateStr < shiftCustomStart) return false;
@@ -698,7 +705,7 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                             <div className="flex justify-between text-gray-500 font-medium">
                               <span>Session Started:</span>
                               <span className="font-semibold text-slate-700">
-                                {parseSqliteUtc(activeShift.opened_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                {formatSriLankaDateTime(activeShift.opened_at, { timeOnly: true, showSeconds: false })}
                               </span>
                             </div>
                             <div className="flex justify-between text-gray-500 font-medium">
@@ -1075,7 +1082,7 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                             <tr key={s.id} className="hover:bg-gray-50/80 transition-colors">
                               <td className="p-4 pl-5">
                                 <p className="font-mono font-black text-slate-900 text-sm">#{s.id}</p>
-                                <p className="text-[10px] text-gray-500">{parseSqliteUtc(s.opened_at).toLocaleString()}</p>
+                                <p className="text-[10px] text-gray-500">{formatSriLankaDateTime(s.opened_at)}</p>
                               </td>
                               <td className="p-3.5 font-bold text-emerald-800">{s.branch_name || s.branch_id}</td>
                               <td className="p-3.5 font-bold text-slate-700">{s.terminal_name || s.terminal_id}</td>
@@ -1180,7 +1187,7 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                             <tr key={h.id} className="hover:bg-gray-50/80 transition-colors">
                               <td className="p-4 pl-5">
                                 <p className="font-mono font-black text-slate-900 text-sm">Handover #{h.id}</p>
-                                <p className="text-[10px] text-gray-500">{parseSqliteUtc(h.handover_time).toLocaleString()}</p>
+                                <p className="text-[10px] text-gray-500">{formatSriLankaDateTime(h.handover_time)}</p>
                               </td>
                               <td className="p-4">
                                 <span className="font-bold text-amber-800 block">{h.terminal_name || h.terminal_id}</span>
@@ -1387,11 +1394,11 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                   </p>
                   {terminalDetails?.activeSession ? (
                     <p className="text-[11px] text-gray-500 mt-0.5">
-                      Session started at <span className="font-mono text-slate-800 font-bold">{parseSqliteUtc(terminalDetails.activeSession.opened_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                      Session started at <span className="font-mono text-slate-800 font-bold">{formatSriLankaDateTime(terminalDetails.activeSession.opened_at, { timeOnly: true, showSeconds: true })}</span>
                     </p>
                   ) : terminalDetails?.latestSessions?.[0]?.closed_at && (
                     <p className="text-[11px] text-gray-500 mt-0.5">
-                      Last shift ended at <span className="font-mono text-slate-800 font-bold">{parseSqliteUtc(terminalDetails.latestSessions[0].closed_at).toLocaleString()}</span>
+                      Last shift ended at <span className="font-mono text-slate-800 font-bold">{formatSriLankaDateTime(terminalDetails.latestSessions[0].closed_at)}</span>
                     </p>
                   )}
                 </div>
@@ -1618,7 +1625,7 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
                       <p className="text-xs text-gray-500 mt-1">This terminal currently has no open cashier register shift. Cashier can open a fresh session to start billing.</p>
                       {terminalDetails?.latestSessions?.[0] && (
                         <p className="text-xs text-slate-700 mt-3 pt-3 border-t border-gray-200">
-                          Previous Shift by <strong className="text-emerald-700">{terminalDetails.latestSessions[0].username}</strong> closed at <span className="font-mono text-gray-500">{parseSqliteUtc(terminalDetails.latestSessions[0].closed_at || terminalDetails.latestSessions[0].opened_at).toLocaleString()}</span>
+                          Previous Shift by <strong className="text-emerald-700">{terminalDetails.latestSessions[0].username}</strong> closed at <span className="font-mono text-gray-500">{formatSriLankaDateTime(terminalDetails.latestSessions[0].closed_at || terminalDetails.latestSessions[0].opened_at)}</span>
                         </p>
                       )}
                     </div>
@@ -2167,7 +2174,7 @@ export default function BranchTerminalBackoffice({ currentUser }: any) {
               <div className="text-center font-bold pb-2 border-b border-slate-200 font-sans">
                 <p className="text-sm font-black text-slate-900">Nova FreshMart</p>
                 <p className="text-[10px] text-slate-500">Terminal Shift Handover Record</p>
-                <p className="text-[10px] text-slate-500">{parseSqliteUtc(selectedHandoverSlip.handover_time).toLocaleString()}</p>
+                <p className="text-[10px] text-slate-500">{formatSriLankaDateTime(selectedHandoverSlip.handover_time)}</p>
               </div>
 
               <div className="flex justify-between text-slate-600 font-sans">

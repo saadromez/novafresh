@@ -10,14 +10,19 @@ import { formatSriLankaDateTime, formatReceiptDate } from '../utils/dateUtils';
 const parseSqliteUtc = (dStr: any): Date => {
   if (!dStr) return new Date();
   if (dStr instanceof Date) return dStr;
-  let s = String(dStr).trim();
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(s) && !s.includes('Z') && !s.includes('+')) {
-    s = s.replace(' ', 'T') + 'Z';
-  } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
-    s = s + 'Z';
+  const s = String(dStr).trim();
+  const match = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const hour = Number(match[4] || 0);
+    const minute = Number(match[5] || 0);
+    const second = Number(match[6] || 0);
+    return new Date(year, month, day, hour, minute, second);
   }
   const d = new Date(s);
-  return isNaN(d.getTime()) ? new Date(dStr) : d;
+  return isNaN(d.getTime()) ? new Date() : d;
 };
 
 export default function DaySaleView({ session, invoices = [], loadSession, loadInvoices, currentUser, initialTab = 'current' }: any) {
@@ -685,7 +690,7 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
               </button>
               <div className="px-3.5 py-2 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-xl text-xs sm:text-sm font-bold flex items-center shadow-xs">
                 <div className="w-2 h-2 rounded-full bg-emerald-500 mr-2 animate-pulse"></div>
-                Session #{activeSession.id} Active ({new Date(activeSession.opened_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})
+                Session #{activeSession.id} Active ({formatSriLankaDateTime(activeSession.opened_at, { timeOnly: true, showSeconds: false })})
               </div>
               <button 
                 onClick={() => {
@@ -1418,7 +1423,7 @@ export default function DaySaleView({ session, invoices = [], loadSession, loadI
                 <div>
                   <h3 className="font-black text-lg text-brand-dark">Session #{viewingSession.id} Details</h3>
                   <p className="text-xs text-gray-400">
-                    Opened: {new Date(viewingSession.opened_at).toLocaleString()} &nbsp;|&nbsp; Closed: {viewingSession.closed_at ? new Date(viewingSession.closed_at).toLocaleString() : 'Open'}
+                    Opened: {formatSriLankaDateTime(viewingSession.opened_at)} &nbsp;|&nbsp; Closed: {viewingSession.closed_at ? formatSriLankaDateTime(viewingSession.closed_at) : 'Open'}
                   </p>
                 </div>
               </div>

@@ -3950,7 +3950,7 @@ ipcMain.handle('record-shift-handover', async (_, data: any) => {
       terminalId,
       data.outgoingCashier || 'Cashier',
       data.incomingCashier || 'Cashier',
-      data.shiftStartedAt || new Date().toISOString(),
+      data.shiftStartedAt || getSriLankaNowString(),
       Number(data.billsCount || 0),
       Number(data.cashSales || 0),
       Number(data.cardSales || 0),
@@ -4028,7 +4028,7 @@ ipcMain.handle('get-cashier-shift-summary', (_, { sessionId, cashier, terminalId
       return {
         sessionId,
         cashier,
-        shiftStartTime: new Date().toISOString(),
+        shiftStartTime: getSriLankaNowString(),
         openingFloat: 0,
         billsCount: 0,
         totalSales: 0,
@@ -4123,7 +4123,7 @@ ipcMain.handle('get-cashier-shift-summary', (_, { sessionId, cashier, terminalId
     return {
       sessionId,
       cashier,
-      shiftStartTime: new Date().toISOString(),
+      shiftStartTime: getSriLankaNowString(),
       openingFloat: 0,
       billsCount: 0,
       totalSales: 0,
